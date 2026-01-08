@@ -54,6 +54,16 @@ class AdvancedRoleRewards(commands.Cog):
         levelup = self.bot.get_cog("LevelUp")
         if not levelup:
             return 0
+
+        # Method 0: Specific User Request (cog.get_level(member))
+        if hasattr(levelup, "get_level"):
+            try:
+                lvl = levelup.get_level(member)
+                if asyncio.iscoroutine(lvl):
+                    lvl = await lvl
+                return int(lvl)
+            except Exception:
+                pass
         
         # Method 1: Vertyco LevelUp (Model based)
         # Usually exposes .data.get_user(guild_id, user_id)
@@ -95,7 +105,7 @@ class AdvancedRoleRewards(commands.Cog):
                  elif hasattr(data, "level"):
                     return int(data.level)
 
-        # Fallback: Check if there is a 'get_level' public method
+        # Fallback: Check if there is a 'get_level' public method with IDs
         if hasattr(levelup, "get_level"):
             try:
                 lvl = await levelup.get_level(member.id, member.guild.id)
