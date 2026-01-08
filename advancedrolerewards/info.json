@@ -1,0 +1,8 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "AdvancedRoleRewards",
+    "short": "Grant role rewards based on level and tenure.",
+    "description": "This cog allows an administrator to grant role rewards based on level and tenure, including multistep, secret, and opt-in rewards.",
+    "tags": ["roles", "rewards", "level", "tenure"],
+    "end_user_data_statement": "This cog stores a start date for users to calculate tenure. This data is removed when the user leaves the server."
+}
