@@ -138,8 +138,8 @@ class AdvancedRoleRewards(commands.Cog):
             
             await asyncio.sleep(300) # Check every 5 minutes
 
-    async def process_member_rewards(self, member: discord.Member, settings: dict) -> tuple:
-        level = await self.get_member_level(member)
+    async def process_member_rewards(self, member: discord.Member, settings: dict, level_override: int = None) -> tuple:
+        level = level_override if level_override is not None else await self.get_member_level(member)
         days = await self.get_tenure_days(member)
         
         to_add = []
@@ -359,6 +359,18 @@ class AdvancedRoleRewards(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member):
         await self.config.user(member).clear()
+
+    @commands.Cog.listener()
+    async def on_member_levelup(self, guild: discord.Guild, member: discord.Member, message: discord.Message, channel: discord.abc.GuildChannel, new_level: int):
+        """
+        Listener for LevelUp cog events.
+        """
+        if member.bot:
+            return
+            
+        settings = await self.config.guild(guild).all()
+        # Pass new_level directly to avoid race conditions with DB updates
+        await self.process_member_rewards(member, settings, level_override=new_level)
 
     # =========================================================================
     # COMMANDS
