@@ -689,10 +689,33 @@ class AdvancedRoleRewards(commands.Cog):
         level = await self.get_member_level(member)
         days = await self.get_tenure_days(member)
         
+        # Integration Check
+        levelup = self.bot.get_cog("LevelUp")
+        int_info = "LevelUp Cog not loaded."
+        
+        if levelup:
+            if hasattr(levelup, "get_level"):
+                try:
+                    # Run a test execution to detect if it's async or sync
+                    res = levelup.get_level(member)
+                    is_coro_obj = asyncio.iscoroutine(res)
+                    
+                    if is_coro_obj:
+                         int_info = "Detected `get_level`: **Asynchronous** (Returns Coroutine). You must `await` it."
+                         await res # Clean up/suppress warning
+                    else:
+                         int_info = f"Detected `get_level`: **Synchronous** (Returns {type(res).__name__}). Do not `await` it."
+                    
+                except Exception as e:
+                    int_info = f"Error inspecting `get_level`: {e}"
+            else:
+                int_info = "Method `get_level` NOT found on LevelUp cog."
+
         status_list = await self._calculate_reward_status(member)
         
         embed = discord.Embed(title=f"Debug: {member.display_name}", color=discord.Color.blue())
         embed.add_field(name="Stats", value=f"Level: {level}\nTenure: {days} days", inline=False)
+        embed.add_field(name="API Check", value=int_info, inline=False)
         
         if status_list:
             desc = ""
@@ -700,8 +723,10 @@ class AdvancedRoleRewards(commands.Cog):
                 role_name = item['role'].name if item['role'] else "Deleted Role"
                 desc += f"**{item['type']}**: {role_name} - {item['status']}\n"
             
-            for page in pagify(desc):
+            for i, page in enumerate(pagify(desc)):
                 embed.description = page
+                if i > 0:
+                     embed.clear_fields()
                 await ctx.send(embed=embed)
                 embed = discord.Embed(color=discord.Color.blue())
         else:
