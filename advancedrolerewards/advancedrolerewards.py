@@ -55,42 +55,52 @@ class AdvancedRoleRewards(commands.Cog):
         if not levelup:
             return 0
         
-        # Method 1: cached_users (Vertyco LevelUp common pattern)
+        # Method 1: Vertyco LevelUp (Model based)
+        # Usually exposes .data.get_user(guild_id, user_id)
         if hasattr(levelup, "data") and hasattr(levelup.data, "get_user"):
-             # Some versions use a generic data manager
-             pass 
+            try:
+                # Vertyco's LevelUp typically uses (guild_id, user_id)
+                user_data = await levelup.data.get_user(member.guild.id, member.id)
+                if user_data and hasattr(user_data, "level"):
+                    return int(user_data.level)
+            except Exception:
+                pass
 
-        # Method 2: Async method to get profile
+        # Method 2: Async method to get profile (Generic)
         if hasattr(levelup, "get_user_profile"):
             try:
                 profile = await levelup.get_user_profile(member.id, member.guild.id)
-                return profile.level
-            except:
+                if hasattr(profile, "level"):
+                    return int(profile.level)
+            except Exception:
                 pass
 
         # Method 3: Direct DB access (Common in some forks)
         if hasattr(levelup, "db"):
             try:
                 # This depends heavily on the specific database driver wrapper
-                # Simplified guess:
                 data = await levelup.db.users.find_one({"user_id": member.id, "guild_id": member.guild.id})
                 if data:
                     return data.get("level", 0)
-            except:
+            except Exception:
                 pass
         
-        # Method 4: Cache dict
+        # Method 4: Cache dict (Simple cache access)
         if hasattr(levelup, "cache"):
              key = f"{member.guild.id}-{member.id}"
              if key in levelup.cache:
-                 return levelup.cache[key].get("level", 0)
+                 data = levelup.cache[key]
+                 if isinstance(data, dict):
+                    return data.get("level", 0)
+                 elif hasattr(data, "level"):
+                    return int(data.level)
 
         # Fallback: Check if there is a 'get_level' public method
         if hasattr(levelup, "get_level"):
             try:
                 lvl = await levelup.get_level(member.id, member.guild.id)
                 return int(lvl)
-            except:
+            except Exception:
                 pass
         
         return 0
