@@ -138,7 +138,7 @@ class AdvancedRoleRewards(commands.Cog):
             
             await asyncio.sleep(300) # Check every 5 minutes
 
-    async def process_member_rewards(self, member: discord.Member, settings: dict):
+    async def process_member_rewards(self, member: discord.Member, settings: dict) -> tuple:
         level = await self.get_member_level(member)
         days = await self.get_tenure_days(member)
         
@@ -212,17 +212,24 @@ class AdvancedRoleRewards(commands.Cog):
                             to_remove.append(r)
 
         # Apply Changes
+        applied_adds = []
+        applied_removes = []
+
         if to_add:
             try:
                 await member.add_roles(*to_add, reason="AdvancedRoleRewards: Criteria met")
+                applied_adds = to_add
             except discord.Forbidden:
                 pass
         
         if to_remove:
             try:
                 await member.remove_roles(*to_remove, reason="AdvancedRoleRewards: Criteria updated")
+                applied_removes = to_remove
             except discord.Forbidden:
                 pass
+
+        return applied_adds, applied_removes
 
     # =========================================================================
     # PUBLIC API
@@ -668,6 +675,27 @@ class AdvancedRoleRewards(commands.Cog):
         else:
             embed.description = "No relevant rewards found."
             await ctx.send(embed=embed)
+    
+    @rolerewardset.command(name="check")
+    async def rrs_check(self, ctx, member: discord.Member):
+        """
+        Manually check and apply rewards for a specific member.
+        Returns a list of roles added or removed.
+        """
+        async with ctx.typing():
+            settings = await self.config.guild(ctx.guild).all()
+            added, removed = await self.process_member_rewards(member, settings)
+        
+        if not added and not removed:
+            return await ctx.send(f"Rewards check completed for {member.display_name}. No changes were made.")
+            
+        msg = f"**Rewards check completed for {member.display_name}:**\n"
+        if added:
+            msg += f"**Roles Added:** {humanize_list([r.name for r in added])}\n"
+        if removed:
+            msg += f"**Roles Removed:** {humanize_list([r.name for r in removed])}\n"
+            
+        await ctx.send(msg)
 
     # --- EXPORT/IMPORT ---
     @rolerewardset.command(name="export")
