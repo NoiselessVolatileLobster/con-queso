@@ -8,7 +8,7 @@ import logging
 import json
 import io
 
-log = logging.getLogger("red.gemini.advancedrolerewards")
+log = logging.getLogger("red.advancedrolerewards")
 
 class AdvancedRoleRewards(commands.Cog):
     """
@@ -110,8 +110,8 @@ class AdvancedRoleRewards(commands.Cog):
             # Fallback for edge cases where joined_at is None (rare API quirk)
             return 0
 
-        # Ensure start_dt is aware if possible, or naive comparison
-        now = datetime.datetime.now(datetime.timezone.utc)
+        # Ensure start_dt is aware (discord.py 2.x standard)
+        now = discord.utils.utcnow()
         if start_dt.tzinfo is None:
             start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
 
@@ -123,16 +123,16 @@ class AdvancedRoleRewards(commands.Cog):
         while True:
             try:
                 for guild in self.bot.guilds:
-                    # Retrieve all settings once per guild to save DB calls
                     settings = await self.config.guild(guild).all()
                     
-                    # We iterate members. For very large servers, chunking might be needed, 
-                    # but simple iteration is usually fine for < 10k members in a loop.
+                    # Note: Requires Privileged Intents (Members) to iterate guild.members
                     for member in guild.members:
                         if member.bot:
                             continue
                         await self.process_member_rewards(member, settings)
                         await asyncio.sleep(0.01) # Yield to prevent blocking
+            except asyncio.CancelledError:
+                break
             except Exception as e:
                 log.error(f"Error in reward loop: {e}")
             
@@ -152,9 +152,6 @@ class AdvancedRoleRewards(commands.Cog):
                 if level >= reward["level"]:
                     if role not in member.roles:
                         to_add.append(role)
-                # We generally don't remove level/day roles if they drop (unlikely for level/days), 
-                # unless strictly enforced. Usually rewards are permanent once earned.
-                # However, for consistency with 'set', we verify.
 
         # 2. Days Rewards
         for reward in settings["days_rewards"]:
@@ -190,32 +187,17 @@ class AdvancedRoleRewards(commands.Cog):
                     if level >= reward["level"] and days >= reward["days"]:
                         if target_role not in member.roles:
                             to_add.append(target_role)
-                # Note: If they lose base role, should they lose target? 
-                # Usually yes for 'Opt-in' logic, but let's stick to "Granting" logic.
-                # If strict enforcement is needed, we would add removal logic here.
 
         # 6. Multistep Rewards
-        # "You must have completed the first step to be able to receive the target role for the next step."
-        # And "remove the role called Friend" (previous step).
         for name, steps in settings["multistep_rewards"].items():
-            # Steps are stored as a list. Sort by some metric? Assuming input order or we sort by requirement difficulty?
-            # Let's trust the input order or sort by days+level magnitude.
-            # Ideally, steps are defined 1, 2, 3.
-            
-            # Find the highest step the user qualifies for
             highest_step_index = -1
             
             for idx, step in enumerate(steps):
                 if level >= step["level"] and days >= step["days"]:
                     highest_step_index = idx
                 else:
-                    # If they fail a step, they can't reach higher ones generally, 
-                    # but check strict logic: "Must have completed first step".
-                    # If they qualify for step 2 but not step 1 (weird config), we should probably block.
-                    # Simplified: Standard monotonic progression.
                     break
             
-            # Assign highest step role, remove others
             if highest_step_index != -1:
                 target_step = steps[highest_step_index]
                 target_role = member.guild.get_role(target_step["role_id"])
@@ -223,17 +205,11 @@ class AdvancedRoleRewards(commands.Cog):
                 if target_role and target_role not in member.roles:
                     to_add.append(target_role)
                 
-                # Remove roles from all other steps in this chain
                 for idx, step in enumerate(steps):
                     if idx != highest_step_index:
                         r = member.guild.get_role(step["role_id"])
                         if r and r in member.roles:
                             to_remove.append(r)
-            else:
-                # User qualifies for nothing in this chain, strictly remove all?
-                # Or leave them alone? Prompt example: "remove the role called Friend... get Best Friend".
-                # Implies we manage the roles actively.
-                pass
 
         # Apply Changes
         if to_add:
@@ -244,7 +220,7 @@ class AdvancedRoleRewards(commands.Cog):
         
         if to_remove:
             try:
-                await member.remove_roles(*to_remove, reason="AdvancedRoleRewards: New step reached or criteria lost")
+                await member.remove_roles(*to_remove, reason="AdvancedRoleRewards: Criteria updated")
             except discord.Forbidden:
                 pass
 
@@ -255,12 +231,6 @@ class AdvancedRoleRewards(commands.Cog):
     def get_reward_status(self, member: discord.Member) -> list:
         """
         Public API for other cogs.
-        Returns a list of dicts:
-        {
-            "role": discord.Role or None (if deleted),
-            "status": str ("Completed", "Pending X days", etc.),
-            "type": str (category name)
-        }
         """
         return asyncio.create_task(self._calculate_reward_status(member))
 
@@ -318,10 +288,6 @@ class AdvancedRoleRewards(commands.Cog):
                 "status": get_status_str(r["level"], r["days"], is_done),
                 "type": "Advanced"
             })
-
-        # Secret - EXCLUDED from API as per "status of this role is not shown anywhere" logic implied
-        # Or should API show it? "The status of this role is not shown anywhere" usually implies UI.
-        # But for API, maybe? Let's hide it to be safe.
         
         # Opt-in
         for r in settings["optin_rewards"]:
@@ -343,19 +309,14 @@ class AdvancedRoleRewards(commands.Cog):
 
         # Multistep
         for name, steps in settings["multistep_rewards"].items():
-            # "For multistep rewards, we will only provide the lowest non-completed step."
             found_next = False
             for step in steps:
                 role = member.guild.get_role(step["role_id"])
                 if not role: continue
                 
-                # Check if this step is completed
-                # Logic: Is the role assigned? OR are requirements met?
-                # Rely on requirements met for status calculation
                 req_met = level >= step["level"] and days >= step["days"]
                 
                 if not req_met:
-                    # This is the lowest non-completed step
                     results.append({
                         "role": role,
                         "status": get_status_str(step["level"], step["days"], False),
@@ -365,7 +326,6 @@ class AdvancedRoleRewards(commands.Cog):
                     break
             
             if not found_next:
-                # All steps done
                 last_step = steps[-1]
                 role = member.guild.get_role(last_step["role_id"])
                 if role:
@@ -384,21 +344,14 @@ class AdvancedRoleRewards(commands.Cog):
     @commands.Cog.listener()
     async def on_member_join(self, member):
         if member.bot: return
-        # Populate start date as join date (timestamp)
-        await self.config.user(member).start_date.set(datetime.datetime.now(datetime.timezone.utc).timestamp())
+        await self.config.user(member).start_date.set(discord.utils.utcnow().timestamp())
         
-        # Trigger check (might be 0 days 0 levels, but good to init)
         settings = await self.config.guild(member.guild).all()
         await self.process_member_rewards(member, settings)
 
     @commands.Cog.listener()
     async def on_member_remove(self, member):
-        # Remove start date
         await self.config.user(member).clear()
-
-    # Listener for LevelUp?
-    # Since there is no standard event, we rely on the loop. 
-    # If the user has a specific event in mind, they can add it, but loop is safer for generic support.
 
     # =========================================================================
     # COMMANDS
@@ -424,13 +377,11 @@ class AdvancedRoleRewards(commands.Cog):
             return await ctx.send("Level must be greater than 0.")
         
         async with self.config.guild(ctx.guild).level_rewards() as rewards:
-            # Check for duplicates
             for r in rewards:
                 if r["level"] == level and r["role_id"] == role.id:
                     return await ctx.send("This reward already exists.")
             
             rewards.append({"level": level, "role_id": role.id})
-            # Sort by level
             rewards.sort(key=lambda x: x["level"])
         
         await ctx.send(f"Added reward: Level {level} -> {role.mention}")
@@ -622,16 +573,12 @@ class AdvancedRoleRewards(commands.Cog):
 
     @rrs_multi.command(name="add")
     async def rrs_multi_add(self, ctx, name: str, days: int, level: int, role: discord.Role):
-        """Add a step to a named multistep chain.
-        Steps are processed in the order they are added.
-        """
+        """Add a step to a named multistep chain."""
         async with self.config.guild(ctx.guild).multistep_rewards() as rewards:
             if name not in rewards:
                 rewards[name] = []
             
             rewards[name].append({"days": days, "level": level, "role_id": role.id})
-            # We don't sort automatically because user might want specific non-linear logic, 
-            # though usually it's linear.
         
         await ctx.send(f"Added step to chain '{name}': {days} Days + Level {level} -> {role.mention}")
 
@@ -681,7 +628,6 @@ class AdvancedRoleRewards(commands.Cog):
             dt = dt.replace(tzinfo=datetime.timezone.utc)
             await self.config.user(user).start_date.set(dt.timestamp())
             await ctx.send(f"Start date for {user.display_name} set to {date_str}.")
-            # Trigger check immediately
             settings = await self.config.guild(ctx.guild).all()
             await self.process_member_rewards(user, settings)
         except ValueError:
@@ -718,7 +664,7 @@ class AdvancedRoleRewards(commands.Cog):
             for page in pagify(desc):
                 embed.description = page
                 await ctx.send(embed=embed)
-                embed = discord.Embed(color=discord.Color.blue()) # Reset for next page if any
+                embed = discord.Embed(color=discord.Color.blue())
         else:
             embed.description = "No relevant rewards found."
             await ctx.send(embed=embed)
@@ -729,10 +675,6 @@ class AdvancedRoleRewards(commands.Cog):
         """Export settings and user stats to JSON."""
         data = await self.config.get_raw_guild_data(ctx.guild.id)
         user_data = await self.config.all_users()
-        
-        # Filter user data for this guild's members to save space/time/relevance?
-        # Config.all_users() is global. We should probably filter by members in guild if we want to be clean,
-        # but the request implies a full export.
         
         export_bundle = {
             "settings": data,
@@ -757,10 +699,7 @@ class AdvancedRoleRewards(commands.Cog):
                 await self.config.guild(ctx.guild).set(data["settings"])
             
             if "users" in data:
-                # We need to be careful with global user data. 
-                # This overwrites start dates.
                 for user_id, u_data in data["users"].items():
-                    # Config expects int for user_id in backend usually, but JSON keys are strings
                     await self.config.user_from_id(int(user_id)).set(u_data)
             
             await ctx.send("Configuration imported successfully.")
