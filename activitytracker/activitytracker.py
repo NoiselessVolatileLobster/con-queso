@@ -262,6 +262,69 @@ class ActivityTracker(commands.Cog):
         for page in pagify(msg):
             await ctx.send(page)
 
+    @activitytrackerset.command(name="listusers")
+    async def list_users(self, ctx):
+        """
+        List all users with their activity status, ID, and last active date.
+        Status can be: Active, Inactive, Hibernating
+        """
+        if not ctx.guild:
+            return
+        
+        await ctx.typing()
+
+        conf = await self.config.guild(ctx.guild).all()
+        inactivity_days = conf["inactivity_days"]
+        # Fetch all member data at once for performance
+        all_member_data = await self.config.all_members(ctx.guild)
+        hibernate_cog = self.bot.get_cog("Hibernate")
+
+        lines = [f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}"]
+        lines.append("-" * 65)
+
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+
+            status = "Inactive"
+            is_hibernating = False
+
+            # Check Hibernation
+            if hibernate_cog:
+                try:
+                    if await hibernate_cog.is_hibernating(member):
+                        status = "Hibernating"
+                        is_hibernating = True
+                except Exception:
+                    pass
+
+            # Check Activity
+            mem_data = all_member_data.get(member.id, {})
+            last_active = mem_data.get("last_active")
+            
+            last_active_str = "Never"
+            if last_active:
+                last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
+                
+                # Only calculate Active/Inactive if not already Hibernating
+                if not is_hibernating:
+                    days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
+                    if days_diff < inactivity_days:
+                        status = "Active"
+            
+            # Format line
+            # Truncate name to 19 chars to fit column
+            name = member.name
+            if len(name) > 19:
+                name = name[:18] + "…"
+            
+            lines.append(f"{name:<20} {str(member.id):<20} {last_active_str:<12} {status}")
+
+        text = "\n".join(lines)
+        
+        for page in pagify(text):
+            await ctx.send(box(page, lang="text"))
+
     @activitytrackerset.command()
     async def preview(self, ctx, toggle: bool):
         """Toggle preview mode (no actions taken when ON)"""
