@@ -262,11 +262,30 @@ class ActivityTracker(commands.Cog):
         for page in pagify(msg):
             await ctx.send(page)
 
-    @activitytrackerset.command(name="listusers")
-    async def list_users(self, ctx):
+    @activitytrackerset.command(name="markallactive")
+    async def mark_all_active(self, ctx):
         """
-        List all users with their activity status, ID, and last active date.
-        Status can be: Active, Inactive, Hibernating
+        Mark ALL non-bot users in the server as active right now.
+        Useful for initializing the cog on a server.
+        """
+        await ctx.send("Marking all users as active. This may take a moment for large servers...")
+        
+        async with ctx.typing():
+            now = datetime.utcnow().timestamp()
+            count = 0
+            for member in ctx.guild.members:
+                if not member.bot:
+                    await self.config.member(member).last_active.set(now)
+                    count += 1
+        
+        await ctx.send(f"Done. Successfully marked {count} users as Active.")
+
+    @activitytrackerset.command(name="listusers")
+    async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating"] = None):
+        """
+        List users with their activity status, ID, and last active date.
+        
+        Optional: Filter by 'active', 'inactive', or 'hibernating'.
         """
         if not ctx.guild:
             return
@@ -275,11 +294,13 @@ class ActivityTracker(commands.Cog):
 
         conf = await self.config.guild(ctx.guild).all()
         inactivity_days = conf["inactivity_days"]
-        # Fetch all member data at once for performance
         all_member_data = await self.config.all_members(ctx.guild)
         hibernate_cog = self.bot.get_cog("Hibernate")
 
-        lines = [f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}"]
+        # Determine title based on filter
+        filter_str = status_filter.title() if status_filter else "All"
+        lines = [f"--- {filter_str} Users ---"]
+        lines.append(f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}")
         lines.append("-" * 65)
 
         for member in ctx.guild.members:
@@ -306,14 +327,17 @@ class ActivityTracker(commands.Cog):
             if last_active:
                 last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
                 
-                # Only calculate Active/Inactive if not already Hibernating
                 if not is_hibernating:
                     days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
                     if days_diff < inactivity_days:
                         status = "Active"
             
+            # Filter logic
+            if status_filter:
+                if status.lower() != status_filter.lower():
+                    continue
+
             # Format line
-            # Truncate name to 19 chars to fit column
             name = member.name
             if len(name) > 19:
                 name = name[:18] + "…"
@@ -322,6 +346,10 @@ class ActivityTracker(commands.Cog):
 
         text = "\n".join(lines)
         
+        if len(lines) <= 3:
+            await ctx.send(f"No users found matching filter: {status_filter or 'All'}")
+            return
+
         # Reduced page_length to 1900 to allow space for the markdown box characters
         for page in pagify(text, page_length=1900):
             await ctx.send(box(page, lang="text"))
