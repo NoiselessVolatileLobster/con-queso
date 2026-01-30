@@ -322,7 +322,8 @@ class ActivityTracker(commands.Cog):
 
         text = "\n".join(lines)
         
-        for page in pagify(text):
+        # Reduced page_length to 1900 to allow space for the markdown box characters
+        for page in pagify(text, page_length=1900):
             await ctx.send(box(page, lang="text"))
 
     @activitytrackerset.command()
