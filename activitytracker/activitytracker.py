@@ -8,7 +8,7 @@ from typing import Literal, Optional, Union, Dict, List
 
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, paginator, humanize_list
+from redbot.core.utils.chat_formatting import box, pagify, humanize_list
 
 log = logging.getLogger("red.activitytracker")
 
@@ -109,7 +109,7 @@ class ActivityTracker(commands.Cog):
             if manual_report_ctx and report_entries:
                 msg = "**ActivityTracker: Normal Mode Activated**\nThe following users are targets for policing actions:\n"
                 msg += "\n".join(report_entries)
-                for page in paginator(msg, prefix="", suffix=""):
+                for page in pagify(msg):
                     await manual_report_ctx.send(page)
 
     async def _get_level(self, member: discord.Member) -> int:
@@ -199,27 +199,27 @@ class ActivityTracker(commands.Cog):
         if member.bot:
             return
 
-        # User joined or switched
-        if after.channel and not before.channel:
-            await self.config.member(member).voice_start.set(datetime.utcnow().timestamp())
-        
-        # User left or switched
-        elif before.channel and not after.channel:
-            start_ts = await self.config.member(member).voice_start()
-            if not start_ts:
-                return
-            
-            duration_mins = (datetime.utcnow().timestamp() - start_ts) / 60
-            conf = await self.config.guild(member.guild).all()
-            
-            # Check conditions
-            if duration_mins >= conf["voice_min_minutes"]:
-                # Check user count in channel (during the session is hard, so we check at leave time as a proxy)
-                # In a more perfect world, we'd track count throughout.
-                if len(before.channel.members) >= conf["voice_min_users"]:
-                    await self.config.member(member).last_active.set(datetime.utcnow().timestamp())
-            
-            await self.config.member(member).voice_start.clear()
+        # 1. Check for Activity END (Leaving a channel or Moving FROM a channel)
+        if before.channel:
+            # We care if they left completely OR moved to a new channel ID
+            if not after.channel or (after.channel and after.channel.id != before.channel.id):
+                start_ts = await self.config.member(member).voice_start()
+                if start_ts:
+                    duration_mins = (datetime.utcnow().timestamp() - start_ts) / 60
+                    conf = await self.config.guild(member.guild).all()
+                    
+                    if duration_mins >= conf["voice_min_minutes"]:
+                        # Check members remaining in the channel we just left/moved from
+                        if len(before.channel.members) >= conf["voice_min_users"]:
+                            await self.config.member(member).last_active.set(datetime.utcnow().timestamp())
+                    
+                    await self.config.member(member).voice_start.clear()
+
+        # 2. Check for Activity START (Joining a channel or Moving TO a channel)
+        if after.channel:
+            # We care if they joined from nothing OR moved from a different channel ID
+            if not before.channel or (before.channel and before.channel.id != after.channel.id):
+                await self.config.member(member).voice_start.set(datetime.utcnow().timestamp())
 
     async def is_active(self, member: discord.Member):
         """Public API for other cogs"""
@@ -259,7 +259,8 @@ class ActivityTracker(commands.Cog):
             f"Report Channel: {getattr(ctx.guild.get_channel(conf['report_channel']), 'mention', 'Not Set')}\n"
             f"**Policing Rules:**\n{rules_str}"
         )
-        await ctx.send(msg)
+        for page in pagify(msg):
+            await ctx.send(page)
 
     @activitytrackerset.command()
     async def preview(self, ctx, toggle: bool):
