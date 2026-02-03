@@ -1,9 +1,0 @@
-{
-    "author": ["NoiselessVolatileLobster"],
-    "description": "Converts uploaded Python files to PDF documents.",
-    "install_msg": "This cog requires the 'fpdf' library to function. Please run `pip install fpdf` in your bot's environment.",
-    "requirements": ["fpdf"],
-    "short": "Convert .py files to .pdf",
-    "tags": ["utility", "pdf", "python", "converter"],
-    "min_bot_version": "3.5.22"
-}
