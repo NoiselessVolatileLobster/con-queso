@@ -1,0 +1,9 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "description": "A communal 6-letter Wordle-style game for Discord.",
+    "install_msg": "Thanks for installing Gortle! Run `[p]gortleset` to configure the channel and role. Make sure you have `solutions.json` and `guesses.json` in the data folder, or the game will run with a very limited default dictionary.",
+    "short": "Communal Wordle for Discord",
+    "tags": ["game", "wordle", "fun"],
+    "requirements": ["tabulate"],
+    "min_bot_version": "3.5.0"
+}
