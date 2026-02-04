@@ -57,14 +57,15 @@ class LowEngagement(commands.Cog):
         
         return 0
 
-    async def issue_warning(self, member: discord.Member, level: int, reason: str):
+    async def issue_warning(self, member: discord.Member, level: int, reason: str) -> bool:
         """
         Integrates with Laggron's WarnSystem.
+        Returns True if successful, False otherwise.
         """
         warnsystem = self.bot.get_cog("WarnSystem")
         if not warnsystem:
             log.warning("WarnSystem cog not loaded. Cannot issue warning.")
-            return
+            return False
 
         guild = member.guild
         # We use the bot itself as the warner
@@ -82,14 +83,17 @@ class LowEngagement(commands.Cog):
                 # Fallback: direct function call if API wrapper isn't structured typically
                 # Note: API implementations vary, this targets the standard Laggron structure
                 await warnsystem.warn(guild=guild, member=member, author=author, reason=reason, level=level)
+            
+            return True
                 
         except Exception as e:
             err_msg = str(e)
             if "No modlog found" in err_msg:
-                log.warning(f"WarnSystem failed to warn {member.id} because no modlog channel is configured. "
-                            f"Please set up a modlog channel using `[p]warnset modlog` or `[p]modlogset`.")
+                log.warning(f"WarnSystem failed to warn {member.id} (Guild: {guild.id}) because no modlog channel is configured in WarnSystem. "
+                            f"Please ensure you have run `[p]warnset modlog` specific to the WarnSystem cog.")
             else:
                 log.error(f"Failed to issue WarnSystem warning to {member.id}: {e}")
+            return False
 
     def is_emoji_only(self, content: str) -> bool:
         """
@@ -287,12 +291,15 @@ class LowEngagement(commands.Cog):
         
         # 1. Issue Level 1 Warning
         reason = f"{conf['warn_text_1']} (Read: {conf['warn_link_1']})"
-        await self.issue_warning(member, 1, reason)
+        success = await self.issue_warning(member, 1, reason)
         
-        # 2. Add to flags
-        async with self.config.guild(ctx.guild).flagged_users() as flags:
-            if member.id not in flags:
-                flags.append(member.id)
-                await ctx.send(f"{member.mention} has been manually marked as Low Engagement. Level 1 warning issued and user is now flagged.")
-            else:
-                await ctx.send(f"{member.mention} was already flagged, but I issued another Level 1 warning as requested.")
+        if success:
+            # 2. Add to flags
+            async with self.config.guild(ctx.guild).flagged_users() as flags:
+                if member.id not in flags:
+                    flags.append(member.id)
+                    await ctx.send(f"{member.mention} has been manually marked as Low Engagement. Level 1 warning issued and user is now flagged.")
+                else:
+                    await ctx.send(f"{member.mention} was already flagged, but I issued another Level 1 warning as requested.")
+        else:
+            await ctx.send(f"❌ Failed to warn {member.mention}. WarnSystem could not issue the warning. Please check your **WarnSystem** modlog configuration (`[p]warnset modlog`).")
