@@ -78,7 +78,7 @@ class LowEngagement(commands.Cog):
             
             if api:
                 # API method: warn(member, author, reason, level)
-                await api.warn(member, author, reason, level)
+                await api.warn(guild, member, author, reason, level)
             else:
                 # Fallback: direct function call if API wrapper isn't structured typically
                 # Note: API implementations vary, this targets the standard Laggron structure
