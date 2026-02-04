@@ -4,6 +4,5 @@
     "short": "Sorts users into houses once they reach a LevelUp milestone.",
     "description": "Integrates with LevelUp to automatically assign house roles when users reach a specific level.",
     "tags": ["utility", "fun", "sorting"],
-    "requirements": ["LevelUp"],
     "end_user_data_statement": "This cog does not store any persistent user data. It only reads configuration settings."
 }
