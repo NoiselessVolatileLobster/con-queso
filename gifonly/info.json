@@ -1,0 +1,7 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "description": "Enforces GIF-only messaging in specific channels.",
+    "short": "Delete non-GIF messages.",
+    "tags": ["gif", "moderation", "fun"],
+    "requirements": ["discord.py"]
+}
