@@ -5,6 +5,8 @@ from redbot.core.utils.chat_formatting import box, humanize_list
 import random
 import asyncio
 import logging
+import time
+from collections import defaultdict
 
 log = logging.getLogger("red.NoiselessVolatileLobster.sortinghat")
 
@@ -27,6 +29,13 @@ class SortingHat(commands.Cog):
         }
         
         self.config.register_guild(**default_guild)
+        
+        # Queue system: {guild_id: [member_id, ...]}
+        self.guild_queues = defaultdict(list)
+        # Active tasks: {guild_id: Task}
+        self.active_tasks = {}
+        # Last sort time: {guild_id: timestamp}
+        self.last_sort_times = defaultdict(float)
 
     # Helper: Get Level
     async def get_member_level(self, member: discord.Member) -> int:
@@ -54,6 +63,54 @@ class SortingHat(commands.Cog):
             if role.id in house_ids:
                 return role
         return None
+
+    # Helper: Add to Queue
+    def enqueue_member(self, guild: discord.Guild, member: discord.Member):
+        if member.id not in self.guild_queues[guild.id]:
+            self.guild_queues[guild.id].append(member.id)
+            self._ensure_processor_running(guild)
+
+    def _ensure_processor_running(self, guild: discord.Guild):
+        if guild.id not in self.active_tasks or self.active_tasks[guild.id].done():
+            self.active_tasks[guild.id] = self.bot.loop.create_task(self._process_queue(guild))
+
+    async def _process_queue(self, guild: discord.Guild):
+        log.info(f"Starting sort queue processor for guild {guild.name} ({guild.id})")
+        
+        while self.guild_queues[guild.id]:
+            # Rate limit check
+            last_time = self.last_sort_times[guild.id]
+            now = time.time()
+            # 1 hour = 3600 seconds
+            elapsed = now - last_time
+            if elapsed < 3600:
+                wait_time = 3600 - elapsed
+                log.info(f"SortingHat: Waiting {wait_time:.1f}s before next sort in {guild.name}")
+                await asyncio.sleep(wait_time)
+
+            # Get next member
+            if not self.guild_queues[guild.id]:
+                break
+                
+            member_id = self.guild_queues[guild.id].pop(0)
+            member = guild.get_member(member_id)
+
+            if member:
+                # Double check eligibility (in case they got sorted while waiting)
+                existing_house = await self.get_assigned_house(guild, member)
+                if not existing_house:
+                    await self.sort_member(guild, member)
+                    # Update time ONLY if we actually tried to sort
+                    self.last_sort_times[guild.id] = time.time()
+                else:
+                    log.info(f"Skipping {member} (already has house)")
+            
+            # If there are more items, we loop back. 
+            # The rate limit check at the top handles the sleep.
+
+        log.info(f"Finished sort queue for guild {guild.name}")
+        if guild.id in self.active_tasks:
+            del self.active_tasks[guild.id]
 
     # Helper: Sort Logic
     async def sort_member(self, guild: discord.Guild, member: discord.Member):
@@ -121,7 +178,8 @@ class SortingHat(commands.Cog):
             # Check if they already have a house
             existing_house = await self.get_assigned_house(guild, member)
             if not existing_house:
-                await self.sort_member(guild, member)
+                # Add to queue instead of sorting immediately
+                self.enqueue_member(guild, member)
 
     @commands.group(name="sortinghatset", aliases=["shset"])
     @commands.guild_only()
@@ -186,7 +244,8 @@ class SortingHat(commands.Cog):
     @sortinghatset.command(name="sortunsorted")
     async def sh_sortunsorted(self, ctx):
         """
-        Manually check and sort all users who meet the level requirement but have no house.
+        Queue all users who meet the level requirement but have no house to be sorted.
+        (Processes 1 user per hour to prevent spam).
         """
         if not self.bot.get_cog("LevelUp"):
             return await ctx.send("The 'LevelUp' cog is not loaded. I cannot determine user levels.")
@@ -199,10 +258,9 @@ class SortingHat(commands.Cog):
 
         msg = await ctx.send("Scanning members... this might take a moment.")
         
-        sorted_count = 0
+        added_count = 0
         skipped_low_level = 0
         skipped_already_sorted = 0
-        errors = 0
 
         async with ctx.typing():
             for member in ctx.guild.members:
@@ -221,29 +279,25 @@ class SortingHat(commands.Cog):
                     continue
 
                 # 2. Check Level
-                # FIX: Must await the helper now
                 lvl = await self.get_member_level(member)
                 if lvl < target_level:
                     skipped_low_level += 1
                     continue
 
-                # 3. Sort
-                result = await self.sort_member(ctx.guild, member)
-                if result:
-                    sorted_count += 1
-                else:
-                    errors += 1
-                
-                # Small sleep to prevent rate limits on large servers
-                if sorted_count % 5 == 0 and sorted_count > 0:
-                    await asyncio.sleep(1)
-
+                # 3. Add to Queue
+                if member.id not in self.guild_queues[ctx.guild.id]:
+                    self.enqueue_member(ctx.guild, member)
+                    added_count += 1
+        
+        current_queue_size = len(self.guild_queues[ctx.guild.id])
+        
         summary = (
-            f"**Sorting Complete**\n"
-            f"Sorted: {sorted_count}\n"
+            f"**Scan Complete**\n"
+            f"Added to Queue: {added_count}\n"
+            f"Current Queue Size: {current_queue_size}\n"
             f"Skipped (Already sorted): {skipped_already_sorted}\n"
-            f"Skipped (Level < {target_level}): {skipped_low_level}\n"
-            f"Errors (Permissions/Setup): {errors}"
+            f"Skipped (Level < {target_level}): {skipped_low_level}\n\n"
+            f"**Note:** Users are processed 1 per hour to prevent channel spam."
         )
         await msg.edit(content=summary)
 
@@ -264,11 +318,14 @@ class SortingHat(commands.Cog):
         channel = ctx.guild.get_channel(conf['greeting_channel'])
         channel_str = channel.mention if channel else "None"
         
+        queue_len = len(self.guild_queues[ctx.guild.id])
+        
         desc = (
             f"**Enabled:** {conf['enabled']}\n"
             f"**Sort Level:** {conf['sort_level']}\n"
             f"**Greeting Channel:** {channel_str}\n"
-            f"**Houses:**\n{houses_str}"
+            f"**Houses:**\n{houses_str}\n\n"
+            f"**Queue Size:** {queue_len} users waiting."
         )
         
         embed = discord.Embed(title="SortingHat Settings", description=desc, color=discord.Color.purple())
