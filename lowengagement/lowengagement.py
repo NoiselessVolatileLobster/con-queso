@@ -84,7 +84,12 @@ class LowEngagement(commands.Cog):
                 await warnsystem.warn(guild=guild, member=member, author=author, reason=reason, level=level)
                 
         except Exception as e:
-            log.error(f"Failed to issue WarnSystem warning to {member.id}: {e}")
+            err_msg = str(e)
+            if "No modlog found" in err_msg:
+                log.warning(f"WarnSystem failed to warn {member.id} because no modlog channel is configured. "
+                            f"Please set up a modlog channel using `[p]warnset modlog` or `[p]modlogset`.")
+            else:
+                log.error(f"Failed to issue WarnSystem warning to {member.id}: {e}")
 
     def is_emoji_only(self, content: str) -> bool:
         """
