@@ -1,0 +1,16 @@
+{
+    "author": [
+        "NoiselessVolatileLobster"
+    ],
+    "install_msg": "This cog detects low effort/engagement users (emoji spam) and warns them using WarnSystem.",
+    "name": "LowEngagement",
+    "short": "Detect and warn users for low engagement behavior.",
+    "description": "Monitors chat for users sending consecutive emoji-only messages. Integrates with LevelUp and WarnSystem.",
+    "tags": [
+        "moderation",
+        "engagement",
+        "utility"
+    ],
+    "requirements": [],
+    "min_bot_version": "3.5.0"
+}
