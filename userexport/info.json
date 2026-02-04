@@ -1,0 +1,8 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "description": "Export a user's messages from the last 10 days to a text file.",
+    "short": "Export user message history.",
+    "tags": ["utility", "export", "logging", "messages"],
+    "requirements": [],
+    "install_msg": "Thanks for installing UserExport. Use [p]userexportset to configure ignored channels, and [p]exportmessages to generate a file."
+}
