@@ -34,8 +34,7 @@ class GifOnly(commands.Cog):
             "media.discordapp.net",
             "klipy.com",
             "pinterest.com",
-            "reddit.com",
-            "redgifs.com"
+            "reddit.com"
         ]
 
     async def is_gif(self, message: discord.Message) -> bool:
