@@ -29,15 +29,22 @@ class SortingHat(commands.Cog):
         self.config.register_guild(**default_guild)
 
     # Helper: Get Level
-    def get_member_level(self, member: discord.Member) -> int:
+    async def get_member_level(self, member: discord.Member) -> int:
         levelup = self.bot.get_cog("LevelUp")
         if not levelup:
             return 0
-        # Accessing the synchronous get_level method from LevelUp API
+        
         try:
-            return levelup.get_level(member)
+            # Check if the method is async or sync to support different versions
+            potential_level = levelup.get_level(member)
+            if asyncio.iscoroutine(potential_level):
+                return await potential_level
+            return potential_level
         except AttributeError:
             # Fallback if API changes
+            return 0
+        except Exception as e:
+            log.error(f"Error getting level for {member}: {e}")
             return 0
 
     # Helper: Check if user has a house
@@ -214,7 +221,8 @@ class SortingHat(commands.Cog):
                     continue
 
                 # 2. Check Level
-                lvl = self.get_member_level(member)
+                # FIX: Must await the helper now
+                lvl = await self.get_member_level(member)
                 if lvl < target_level:
                     skipped_low_level += 1
                     continue
