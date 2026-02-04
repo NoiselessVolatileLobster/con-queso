@@ -77,15 +77,10 @@ class LowEngagement(commands.Cog):
             api = getattr(warnsystem, "api", None)
             
             if api:
-                # Correct API Signature: warn(guild, member, author, level, reason)
-                # We use keyword arguments to be safe and explicit, matching the API docs.
-                await api.warn(
-                    guild=guild,
-                    member=member,
-                    author=author,
-                    level=level,
-                    reason=reason
-                )
+                # Correct API Signature (Positional): warn(guild, member, author, reason, level)
+                # Using positional arguments to avoid 'unexpected keyword argument' errors
+                # due to variable parameter names (e.g. member vs user) in different versions.
+                await api.warn(guild, member, author, reason, level)
             else:
                 # Fallback: direct function call if API wrapper isn't structured typically
                 # Note: API implementations vary, this targets the standard Laggron structure
