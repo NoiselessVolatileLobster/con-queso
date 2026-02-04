@@ -152,7 +152,12 @@ class SortingHat(commands.Cog):
             channel = guild.get_channel(greet_channel_id)
             if channel and channel.permissions_for(guild.me).send_messages:
                 msg_template = await self.config.guild(guild).greeting_message()
-                message = msg_template.replace("{house}", chosen_house.mention).replace("{member}", member.mention)
+                
+                # Replace placeholders
+                message = msg_template.replace("{house}", chosen_house.mention)
+                message = message.replace("{member}", member.mention)
+                message = message.replace("{mention}", member.mention) # Added alias
+                
                 try:
                     await channel.send(message)
                 except discord.HTTPException:
@@ -236,7 +241,14 @@ class SortingHat(commands.Cog):
     async def sh_message(self, ctx, *, message: str):
         """
         Set the greeting message.
-        Variables: {member} (mention), {house} (role mention).
+        
+        Available Variables:
+        {member}  - Mentions the user (e.g. @User)
+        {mention} - Alias for {member}
+        {house}   - Mentions the house role (e.g. @Gryffindor)
+        
+        Example:
+        [p]shset message {member} has been sorted into {house}!
         """
         await self.config.guild(ctx.guild).greeting_message.set(message)
         await ctx.send("Greeting message updated.")
