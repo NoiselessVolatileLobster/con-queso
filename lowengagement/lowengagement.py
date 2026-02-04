@@ -77,8 +77,15 @@ class LowEngagement(commands.Cog):
             api = getattr(warnsystem, "api", None)
             
             if api:
-                # API method: warn(member, author, reason, level)
-                await api.warn(guild, member, author, reason, level)
+                # Correct API Signature: warn(guild, member, author, level, reason)
+                # We use keyword arguments to be safe and explicit, matching the API docs.
+                await api.warn(
+                    guild=guild,
+                    member=member,
+                    author=author,
+                    level=level,
+                    reason=reason
+                )
             else:
                 # Fallback: direct function call if API wrapper isn't structured typically
                 # Note: API implementations vary, this targets the standard Laggron structure
@@ -90,7 +97,7 @@ class LowEngagement(commands.Cog):
             err_msg = str(e)
             if "No modlog found" in err_msg:
                 log.warning(f"WarnSystem failed to warn {member.id} (Guild: {guild.id}) because no modlog channel is configured in WarnSystem. "
-                            f"Please ensure you have run `[p]warnset modlog` specific to the WarnSystem cog.")
+                            f"Please ensure you have configured a log channel using `[p]warnset channel`.")
             else:
                 log.error(f"Failed to issue WarnSystem warning to {member.id}: {e}")
             return False
@@ -302,4 +309,4 @@ class LowEngagement(commands.Cog):
                 else:
                     await ctx.send(f"{member.mention} was already flagged, but I issued another Level 1 warning as requested.")
         else:
-            await ctx.send(f"❌ Failed to warn {member.mention}. WarnSystem could not issue the warning. Please check your **WarnSystem** modlog configuration (`[p]warnset modlog`).")
+            await ctx.send(f"❌ Failed to warn {member.mention}. WarnSystem could not issue the warning. Please check your **WarnSystem** modlog configuration (`[p]warnset channel`).")
