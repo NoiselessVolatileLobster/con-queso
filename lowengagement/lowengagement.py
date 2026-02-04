@@ -2,250 +2,277 @@ import discord
 import re
 import datetime
 import logging
-from typing import Optional, List
+from typing import Optional, Union, List
 
 from redbot.core import commands, Config, checks
-from redbot.core.utils.chat_formatting import box, pagify
+from redbot.core.bot import Red
+from redbot.core.utils.chat_formatting import box, humanize_timedelta
 
-log = logging.getLogger("red.NoiselessVolatileLobster.LowEngagement")
+log = logging.getLogger("red.NoiselessVolatileLobster.lowengagement")
 
 class LowEngagement(commands.Cog):
     """
-    Detects and penalizes low engagement users who spam emojis.
+    Detect and warn users with low engagement (emoji-only spam).
     """
 
-    def __init__(self, bot):
+    def __init__(self, bot: Red):
         self.bot = bot
-        self.config = Config.get_conf(self, identifier=981237498127, force_registration=True)
+        self.config = Config.get_conf(self, identifier=987123654, force_registration=True)
 
         default_guild = {
             "enabled": False,
-            "emoji_limit": 3,           # How many messages in a row
-            "time_window_days": 1,      # Time window to count those messages
-            "level_threshold": 5,       # Level <= this gets checked
-            "warn_text_1": "Low Engagement: Please use words, not just emojis.",
-            "warn_link_1": "https://discord.com/guidelines",
-            "warn_text_3": "Repeated Low Engagement: Continued emoji spam.",
-            "flagged_users": []         # List of user IDs who have hit strike 1
+            "emoji_streak_limit": 5,
+            "time_window_days": 1,
+            "max_level_ignored": 10,  # Users above this level are safe
+            "warn_msg_lvl1": "Please avoid sending multiple messages containing only emojis. Contribute to the conversation with text.",
+            "warn_link": "https://discord.com/guidelines",
+            "warn_msg_lvl3": "Repeated low engagement behavior (emoji spam) after a warning.",
+            "ignored_channels": [],
+            "ignored_roles": []
+        }
+
+        default_member = {
+            "streak": 0,
+            "last_emoji_ts": 0.0,
+            "is_flagged": False
         }
 
         self.config.register_guild(**default_guild)
+        self.config.register_member(**default_member)
 
         # Regex to match custom emojis <a:name:id> or <:name:id>
         self.custom_emoji_regex = re.compile(r'<a?:\w+:\d+>')
 
-    async def get_user_level(self, member: discord.Member) -> int:
-        """
-        Integrates with VRT LevelUp to get a user's level.
-        Returns 0 if cog not found or user has no data.
-        """
-        levelup = self.bot.get_cog("LevelUp")
-        if not levelup:
-            return 0
-        
-        # Based on VRT LevelUp API
-        try:
-            # Some versions use get_level, others might need profile access
-            if hasattr(levelup, "get_level"):
-                return await levelup.get_level(member)
-            # Fallback for different versions/structures of LevelUp
-            data = await levelup.db.users.find_one({"user_id": str(member.id), "guild_id": str(member.guild.id)})
-            if data:
-                return data.get("level", 0)
-        except Exception as e:
-            log.debug(f"Failed to fetch level for {member.id}: {e}")
-        
-        return 0
-
-    async def issue_warning(self, member: discord.Member, level: int, reason: str) -> bool:
-        """
-        Integrates with Laggron's WarnSystem.
-        Returns True if successful, False otherwise.
-        """
-        warnsystem = self.bot.get_cog("WarnSystem")
-        if not warnsystem:
-            log.warning("WarnSystem cog not loaded. Cannot issue warning.")
-            return False
-
-        guild = member.guild
-        # We use the bot itself as the warner
-        author = guild.me
-
-        try:
-            # Using the API as described in standard WarnSystem integrations
-            # Attempting to locate the API wrapper usually found on the cog
-            api = getattr(warnsystem, "api", None)
-            
-            if api:
-                # Correct API Signature: warn(guild, member, author, level, reason)
-                # We use keyword arguments to be absolutely safe and avoid position errors.
-                await api.warn(
-                    guild=guild,
-                    member=member,
-                    author=author,
-                    level=level,
-                    reason=reason
-                )
-                return True
-            else:
-                # Fallback: If no API wrapper, we log an error because calling the command directly
-                # without a Context object is unreliable and often fails.
-                log.error("WarnSystem API not found on the cog. Please ensure WarnSystem is up to date.")
-                return False
-                
-        except Exception as e:
-            err_msg = str(e)
-            if "No modlog found" in err_msg:
-                log.warning(f"WarnSystem failed to warn {member.id} (Guild: {guild.id}) because no modlog channel is configured in WarnSystem. "
-                            f"Please ensure you have configured a log channel using `[p]warnset channel`.")
-            else:
-                log.error(f"Failed to issue WarnSystem warning to {member.id}: {e}")
-            return False
+        # Broad regex for unicode emojis/symbols
+        # This includes standard emoji ranges, dingbats, geometric shapes, etc.
+        self.unicode_emoji_regex = re.compile(
+            r'['
+            r'\U0001f000-\U0001faff'  # Supplemental Symbols and Pictographs
+            r'\U00002000-\U00002bff'  # General Punctuation/Symbols (inc. some math/arrows often used as emojis)
+            r'\U00002600-\U000027ff'  # Misc Symbols / Dingbats
+            r'\U0000fe00-\U0000fe0f'  # Variation Selectors
+            r'\U0001f900-\U0001f9ff'  # Supplemental Symbols and Pictographs
+            r']+', flags=re.UNICODE
+        )
 
     def is_emoji_only(self, content: str) -> bool:
         """
-        Determines if a message is purely emojis (custom or unicode).
+        Determines if a string is composed 'only' of emojis (custom or unicode) and whitespace.
         """
         if not content:
-            return False # Attachments only, etc.
-
-        # 1. Remove custom emojis
-        content = self.custom_emoji_regex.sub('', content)
-
-        # 2. Remove whitespace
-        content = content.strip()
-
-        # 3. Simple heuristic for unicode emojis:
-        # If the string is now empty, it was likely just custom emojis + whitespace.
-        if len(content) == 0:
-            return True
-
-        # 4. Unicode Emoji Check
-        # It is difficult to regex ALL unicode emojis perfectly without external libs.
-        # We check if the remaining characters are "symbol-like" or common emoji ranges.
-        # This is a basic filter. If it contains alphanumeric chars, it's not emoji only.
-        if re.search(r'[a-zA-Z0-9]', content):
             return False
-            
-        return True
+
+        # 1. Remove Custom Emojis
+        temp = self.custom_emoji_regex.sub('', content)
+
+        # 2. Remove Unicode Emojis (Broad sweep)
+        temp = self.unicode_emoji_regex.sub('', temp)
+
+        # 3. Strip whitespace
+        temp = temp.strip()
+
+        # 4. If nothing is left, it was all emojis/whitespace
+        return len(temp) == 0
+
+    async def get_user_level(self, member: discord.Member) -> int:
+        """Get LevelUp level for a member, defaulting to 0 if not found."""
+        levelup = self.bot.get_cog("LevelUp")
+        if not levelup:
+            return 0
+        try:
+            # Check if get_level exists and is callable
+            if hasattr(levelup, "get_level"):
+                # Potential return types depending on version: int or object with .level
+                lvl = levelup.get_level(member)
+                if isinstance(lvl, int):
+                    return lvl
+                # Handle object return if needed (hypothetical, based on common patterns)
+                return getattr(lvl, "level", 0)
+        except Exception as e:
+            log.debug(f"Failed to get level for {member.id}: {e}")
+        return 0
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild:
+        if message.author.bot:
+            return
+        if not message.guild:
+            return
+        if not await self.config.guild(message.guild).enabled():
             return
 
-        # Check if enabled
-        conf = await self.config.guild(message.guild).all()
-        if not conf["enabled"]:
+        # Hibernate Integration
+        hibernate = self.bot.get_cog("Hibernate")
+        if hibernate:
+            try:
+                is_hibernating = await hibernate.is_hibernating(message.author)
+                if is_hibernating:
+                    return
+            except Exception:
+                pass # Hibernate method might differ or fail, safe ignore
+
+        # Ignore if user has ignored role
+        ignored_roles = await self.config.guild(message.guild).ignored_roles()
+        if any(r.id in ignored_roles for r in message.author.roles):
             return
 
-        # 1. Check content of CURRENT message first to save resources
-        if not self.is_emoji_only(message.content):
+        # Ignore if channel is ignored
+        ignored_channels = await self.config.guild(message.guild).ignored_channels()
+        if message.channel.id in ignored_channels:
             return
 
-        # 2. Level Check
+        is_emoji = self.is_emoji_only(message.content)
+        member_conf = self.config.member(message.author)
+        guild_conf = self.config.guild(message.guild)
+
+        if not is_emoji:
+            # Reset streak on valid engagement
+            await member_conf.streak.set(0)
+            return
+
+        # It IS an emoji-only message
+        # Check Level
         user_level = await self.get_user_level(message.author)
-        if user_level > conf["level_threshold"]:
+        max_level = await guild_conf.max_level_ignored()
+
+        # If user is a high level veteran, ignore them (unless max_level is -1 for everyone)
+        if user_level > max_level and max_level != -1:
             return
 
-        # 3. History Check (The expensive part)
-        # We need to find the last X messages FROM THIS USER
-        emoji_limit = conf["emoji_limit"]
-        days_limit = conf["time_window_days"]
-        cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=days_limit)
-
-        user_messages = []
+        # Check time window
+        last_ts = await member_conf.last_emoji_ts()
+        now_ts = datetime.datetime.now(datetime.timezone.utc).timestamp()
         
-        # We fetch a buffer. If limit is 3, fetching 50 history is usually safe to find 3 user msgs.
-        try:
-            async for msg in message.channel.history(limit=50):
-                if msg.author.id == message.author.id:
-                    # Check time window
-                    if msg.created_at < cutoff:
-                        break # Too old, stop searching
-                    
-                    user_messages.append(msg)
-                    
-                    if len(user_messages) >= emoji_limit:
-                        break
-        except Exception:
-            # Perm errors or other issues
-            return
+        window_days = await guild_conf.time_window_days()
+        window_seconds = window_days * 86400
 
-        # If we didn't find enough messages within the time window
-        if len(user_messages) < emoji_limit:
-            return
+        current_streak = await member_conf.streak()
 
-        # Verify ALL found messages are emoji only
-        for msg in user_messages:
-            if not self.is_emoji_only(msg.content):
-                return
-
-        # 4. Trigger Logic
-        flagged_users = conf["flagged_users"]
-        uid = message.author.id
-
-        if uid in flagged_users:
-            # Repeat Offender -> Level 3 Warning
-            reason = conf["warn_text_3"]
-            await self.issue_warning(message.author, 3, reason)
-            # We do not remove them from flagged list; they remain flagged until admin reset
+        if (now_ts - last_ts) > window_seconds:
+            # Time window expired, reset streak to 1
+            current_streak = 1
         else:
-            # First Offense -> Level 1 Warning
-            reason = f"{conf['warn_text_1']} (Read: {conf['warn_link_1']})"
-            await self.issue_warning(message.author, 1, reason)
-            
-            # Add to flags
-            async with self.config.guild(message.guild).flagged_users() as flags:
-                if uid not in flags:
-                    flags.append(uid)
+            current_streak += 1
 
-    @commands.group(name="lowengagementset", aliases=["leset"])
+        # Update data
+        await member_conf.last_emoji_ts.set(now_ts)
+        await member_conf.streak.set(current_streak)
+
+        streak_limit = await guild_conf.emoji_streak_limit()
+
+        if current_streak >= streak_limit:
+            # Reset streak so we don't spam warn on every single subsequent emoji
+            await member_conf.streak.set(0)
+            await self.trigger_warning(message.guild, message.author)
+
+    async def trigger_warning(self, guild: discord.Guild, member: discord.Member, manual: bool = False):
+        """
+        Executes the warning logic using WarnSystem.
+        """
+        warnsystem = self.bot.get_cog("WarnSystem")
+        if not warnsystem:
+            log.warning("WarnSystem cog not loaded. Cannot warn user.")
+            return
+
+        # Get API
+        api = getattr(warnsystem, "api", None)
+        if not api:
+            log.warning("WarnSystem API not found.")
+            return
+
+        member_conf = self.config.member(member)
+        is_flagged = await member_conf.is_flagged()
+        guild_conf = self.config.guild(guild)
+
+        if not is_flagged and not manual:
+            # Level 1 Warn
+            reason_text = await guild_conf.warn_msg_lvl1()
+            link = await guild_conf.warn_msg_lvl1()
+            link_text = await guild_conf.warn_link()
+            
+            full_reason = f"{reason_text}\nRead more: {link_text}"
+            
+            try:
+                # Warning Level 1
+                await api.warn(
+                    guild=guild,
+                    members=[member],
+                    author=guild.me, # Bot is the author
+                    level=1,
+                    reason=full_reason
+                )
+                await member_conf.is_flagged.set(True)
+                log.info(f"LowEngagement: Issued Level 1 warn to {member.id} in {guild.name}")
+            except Exception as e:
+                log.error(f"Failed to issue Level 1 warn: {e}")
+
+        else:
+            # Already flagged OR Manual trigger -> Treat as repeat offense -> Level 3 Warn
+            # Note: Manual trigger puts them here immediately? 
+            # The prompt says: "Manual... mark a user as low engagement... They will receive a Level 1 WarnSystem warning, and be flagged... so next time... Level 3"
+            
+            if manual:
+                # Special logic for manual: Give Level 1, set Flag.
+                reason_text = await guild_conf.warn_msg_lvl1()
+                link_text = await guild_conf.warn_link()
+                full_reason = f"[Manual Mark] {reason_text}\nRead more: {link_text}"
+
+                try:
+                    await api.warn(
+                        guild=guild,
+                        members=[member],
+                        author=guild.me,
+                        level=1,
+                        reason=full_reason
+                    )
+                    await member_conf.is_flagged.set(True)
+                    log.info(f"LowEngagement: Manually marked {member.id} in {guild.name}")
+                except Exception as e:
+                    log.error(f"Failed to issue Manual Level 1 warn: {e}")
+
+            else:
+                # Is Flagged (Repeat offense)
+                reason_text = await guild_conf.warn_msg_lvl3()
+                
+                try:
+                    # Warning Level 3 (Kick)
+                    await api.warn(
+                        guild=guild,
+                        members=[member],
+                        author=guild.me,
+                        level=3,
+                        reason=reason_text
+                    )
+                    # We do not reset the flag. They remain low engagement until manually cleared or logic changes.
+                    log.info(f"LowEngagement: Issued Level 3 warn to {member.id} in {guild.name}")
+                except Exception as e:
+                    log.error(f"Failed to issue Level 3 warn: {e}")
+
+
+    @commands.group()
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
     async def lowengagementset(self, ctx):
-        """Configuration settings for Low Engagement cog."""
+        """Configuration for Low Engagement detection."""
         pass
 
-    @lowengagementset.command(name="view")
-    async def view_settings(self, ctx):
-        """View the current configuration settings."""
-        conf = await self.config.guild(ctx.guild).all()
-        
-        # Using a code block table as requested
-        table_data = [
-            f"{'Setting':<20} | {'Value'}",
-            f"{'-'*21}|{'-'*30}",
-            f"{'Enabled':<20} | {str(conf['enabled'])}",
-            f"{'Emoji Limit':<20} | {conf['emoji_limit']} msgs in a row",
-            f"{'Time Window':<20} | {conf['time_window_days']} days",
-            f"{'Level Threshold':<20} | Level {conf['level_threshold']}",
-            f"{'Flagged Users':<20} | {len(conf['flagged_users'])} users",
-            f"{'Warn Text (Lvl 1)':<20} | {conf['warn_text_1'][:25]}...",
-            f"{'Warn Text (Lvl 3)':<20} | {conf['warn_text_3'][:25]}...",
-        ]
-        
-        table_str = "\n".join(table_data)
-        await ctx.send(box(table_str, lang="prolog"))
-
-    @lowengagementset.command(name="toggle")
-    async def toggle_cog(self, ctx):
-        """Toggle the cog on or off for this guild."""
-        current = await self.config.guild(ctx.guild).enabled()
-        await self.config.guild(ctx.guild).enabled.set(not current)
-        await ctx.send(f"LowEngagement is now **{'Enabled' if not current else 'Disabled'}**.")
+    @lowengagementset.command(name="enable")
+    async def set_enable(self, ctx, toggle: bool):
+        """Enable or disable the cog for this server."""
+        await self.config.guild(ctx.guild).enabled.set(toggle)
+        await ctx.send(f"LowEngagement enabled: {toggle}")
 
     @lowengagementset.command(name="limit")
     async def set_limit(self, ctx, count: int):
-        """Set the number of emoji-only messages in a row to trigger."""
+        """Set the number of consecutive emoji messages required to trigger."""
         if count < 1:
             return await ctx.send("Limit must be at least 1.")
-        await self.config.guild(ctx.guild).emoji_limit.set(count)
-        await ctx.send(f"Emoji limit set to {count} messages.")
+        await self.config.guild(ctx.guild).emoji_streak_limit.set(count)
+        await ctx.send(f"Streak limit set to {count}.")
 
     @lowengagementset.command(name="days")
     async def set_days(self, ctx, days: int):
-        """Set the time window in days for the message count."""
+        """Set the time window in days for the streak to be valid."""
         if days < 1:
             return await ctx.send("Days must be at least 1.")
         await self.config.guild(ctx.guild).time_window_days.set(days)
@@ -253,60 +280,90 @@ class LowEngagement(commands.Cog):
 
     @lowengagementset.command(name="level")
     async def set_level(self, ctx, level: int):
-        """Set the LevelUp threshold (Users above this level are ignored)."""
-        await self.config.guild(ctx.guild).level_threshold.set(level)
-        await ctx.send(f"Level threshold set to {level}. Users above this level are immune.")
+        """Set the max LevelUp level. Users above this are ignored. Set -1 to track everyone."""
+        await self.config.guild(ctx.guild).max_level_ignored.set(level)
+        await ctx.send(f"Max level set to {level}.")
 
-    @lowengagementset.command(name="text1")
-    async def set_text1(self, ctx, *, text: str):
+    @lowengagementset.command(name="reason1")
+    async def set_reason1(self, ctx, *, text: str):
         """Set the warning text for the first offense (Level 1)."""
-        await self.config.guild(ctx.guild).warn_text_1.set(text)
+        await self.config.guild(ctx.guild).warn_msg_lvl1.set(text)
         await ctx.send("Level 1 warning text updated.")
 
-    @lowengagementset.command(name="link1")
-    async def set_link1(self, ctx, link: str):
-        """Set the link included in the first offense warning."""
-        await self.config.guild(ctx.guild).warn_link_1.set(link)
-        await ctx.send("Level 1 warning link updated.")
+    @lowengagementset.command(name="link")
+    async def set_link(self, ctx, link: str):
+        """Set the link appended to the Level 1 warning."""
+        await self.config.guild(ctx.guild).warn_link.set(link)
+        await ctx.send("Warning link updated.")
 
-    @lowengagementset.command(name="text3")
-    async def set_text3(self, ctx, *, text: str):
-        """Set the warning text for repeated offenses (Level 3)."""
-        await self.config.guild(ctx.guild).warn_text_3.set(text)
+    @lowengagementset.command(name="reason3")
+    async def set_reason3(self, ctx, *, text: str):
+        """Set the warning text for the second offense (Level 3)."""
+        await self.config.guild(ctx.guild).warn_msg_lvl3.set(text)
         await ctx.send("Level 3 warning text updated.")
 
-    @lowengagementset.command(name="resetflags")
-    async def reset_flags(self, ctx):
-        """Clear the list of flagged users (Resets everyone to Strike 1 status)."""
-        await self.config.guild(ctx.guild).flagged_users.set([])
-        await ctx.send("All flagged users have been reset. Next offense will be treated as a first offense.")
-
-    @lowengagementset.command(name="unflag")
-    async def unflag_user(self, ctx, member: discord.Member):
-        """Unflag a specific user."""
-        async with self.config.guild(ctx.guild).flagged_users() as flags:
-            if member.id in flags:
-                flags.remove(member.id)
-                await ctx.send(f"{member.display_name} has been unflagged.")
+    @lowengagementset.command(name="ignorechannel")
+    async def ignore_channel(self, ctx, channel: discord.TextChannel):
+        """Toggle ignoring a specific channel."""
+        async with self.config.guild(ctx.guild).ignored_channels() as ignored:
+            if channel.id in ignored:
+                ignored.remove(channel.id)
+                await ctx.send(f"{channel.mention} is no longer ignored.")
             else:
-                await ctx.send(f"{member.display_name} was not flagged.")
+                ignored.append(channel.id)
+                await ctx.send(f"{channel.mention} is now ignored.")
 
-    @lowengagementset.command(name="manual", aliases=["mark"])
-    async def manual_flag(self, ctx, member: discord.Member):
-        """Manually mark a user as Low Engagement (Issues Lvl 1 Warn + Flags)."""
-        conf = await self.config.guild(ctx.guild).all()
+    @lowengagementset.command(name="ignorerole")
+    async def ignore_role(self, ctx, role: discord.Role):
+        """Toggle ignoring a specific role."""
+        async with self.config.guild(ctx.guild).ignored_roles() as ignored:
+            if role.id in ignored:
+                ignored.remove(role.id)
+                await ctx.send(f"`{role.name}` is no longer ignored.")
+            else:
+                ignored.append(role.id)
+                await ctx.send(f"`{role.name}` is now ignored.")
+
+    @lowengagementset.command(name="view")
+    async def view_settings(self, ctx):
+        """View current LowEngagement settings."""
+        settings = await self.config.guild(ctx.guild).all()
         
-        # 1. Issue Level 1 Warning
-        reason = f"{conf['warn_text_1']} (Read: {conf['warn_link_1']})"
-        success = await self.issue_warning(member, 1, reason)
+        warn_system_status = "Loaded" if self.bot.get_cog("WarnSystem") else "Not Loaded (Required)"
+        level_up_status = "Loaded" if self.bot.get_cog("LevelUp") else "Not Loaded"
+        hibernate_status = "Loaded" if self.bot.get_cog("Hibernate") else "Not Loaded"
+
+        msg = (
+            f"**Enabled**: {settings['enabled']}\n"
+            f"**Streak Limit**: {settings['emoji_streak_limit']} messages\n"
+            f"**Time Window**: {settings['time_window_days']} days\n"
+            f"**Max Level Ignored**: {settings['max_level_ignored']}\n"
+            f"**Ignored Channels**: {len(settings['ignored_channels'])}\n"
+            f"**Ignored Roles**: {len(settings['ignored_roles'])}\n\n"
+            f"**Lvl 1 Reason**: {settings['warn_msg_lvl1']}\n"
+            f"**Link**: {settings['warn_link']}\n"
+            f"**Lvl 3 Reason**: {settings['warn_msg_lvl3']}\n\n"
+            f"__Integrations__\n"
+            f"WarnSystem: {warn_system_status}\n"
+            f"LevelUp: {level_up_status}\n"
+            f"Hibernate: {hibernate_status}"
+        )
+
+        embed = discord.Embed(title="Low Engagement Settings", description=msg, color=await ctx.embed_color())
+        await ctx.send(embed=embed)
+
+    @commands.command()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def marklowengagement(self, ctx, member: discord.Member):
+        """
+        Manually mark a user as Low Engagement.
         
-        if success:
-            # 2. Add to flags
-            async with self.config.guild(ctx.guild).flagged_users() as flags:
-                if member.id not in flags:
-                    flags.append(member.id)
-                    await ctx.send(f"{member.mention} has been manually marked as Low Engagement. Level 1 warning issued and user is now flagged.")
-                else:
-                    await ctx.send(f"{member.mention} was already flagged, but I issued another Level 1 warning as requested.")
-        else:
-            await ctx.send(f"❌ Failed to warn {member.mention}. WarnSystem could not issue the warning. Please check your **WarnSystem** modlog configuration (`[p]warnset channel`).")
+        This will issue a Level 1 warning immediately and flag them for Level 3 on next offense.
+        """
+        await ctx.send(f"Processing manual low engagement mark for {member.mention}...")
+        
+        # We pass manual=True to trigger the specific logic requested:
+        # "They will receive a Level 1 WarnSystem warning, and be flagged... so next time... Level 3"
+        await self.trigger_warning(ctx.guild, member, manual=True)
+        
+        await ctx.tick()
