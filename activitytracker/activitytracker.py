@@ -97,9 +97,14 @@ class ActivityTracker(commands.Cog):
         cog = self.bot.get_cog("LevelUp")
         if cog:
             try:
-                # Based on provided integration text: cog.get_level(member)
+                # Check for get_level method
                 if hasattr(cog, "get_level"):
-                    return cog.get_level(member)
+                    result = cog.get_level(member)
+                    # Check if it's a coroutine (async) and await it if so
+                    if asyncio.iscoroutine(result):
+                        return await result
+                    # Otherwise return directly
+                    return result
             except Exception as e:
                 log.debug(f"Failed to fetch level for {member}: {e}")
         return 0
@@ -180,6 +185,10 @@ class ActivityTracker(commands.Cog):
                 applicable_rule = None
                 user_level = await self._get_level(member)
                 
+                # Verify user_level is an int before comparison, just in case
+                if not isinstance(user_level, (int, float)):
+                    user_level = 0
+
                 for rule in rules:
                     if user_level >= rule["level"] and days_inactive >= rule["days"]:
                         applicable_rule = rule
