@@ -39,6 +39,32 @@ class LevelUpTracker(commands.Cog):
         await self.config.user_from_id(user_id).clear()
 
     # --------------------------------------------------------------------------
+    # Helper: Time Formatting
+    # --------------------------------------------------------------------------
+    def _short_timedelta(self, delta: timedelta) -> str:
+        """Format timedelta into a short string (e.g., 1d 2h)."""
+        seconds = int(delta.total_seconds())
+        if seconds == 0:
+            return "0s"
+
+        days, seconds = divmod(seconds, 86400)
+        hours, seconds = divmod(seconds, 3600)
+        minutes, seconds = divmod(seconds, 60)
+
+        parts = []
+        if days:
+            parts.append(f"{days}d")
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if seconds:
+            parts.append(f"{seconds}s")
+        
+        # Limit to 2 most significant units to keep tables clean
+        return " ".join(parts[:2])
+
+    # --------------------------------------------------------------------------
     # Helper: Table Formatting
     # --------------------------------------------------------------------------
     def _make_table(self, headers: list, rows: list) -> str:
@@ -428,15 +454,15 @@ class LevelUpTracker(commands.Cog):
 
             if initial_level == 0:
                 total_delta = current_dt - join_dt
-                total_str = humanize_timedelta(timedelta=total_delta) or "0s"
+                total_str = self._short_timedelta(total_delta)
             else:
                 start_ts = levels.get(str(initial_level), join_ts)
                 total_delta = current_dt - datetime.fromtimestamp(start_ts, timezone.utc)
-                total_str = (humanize_timedelta(timedelta=total_delta) or "0s") + "*"
+                total_str = self._short_timedelta(total_delta) + "*"
 
             # 2. Time from Previous
             step_delta = current_dt - datetime.fromtimestamp(prev_ts, timezone.utc)
-            step_str = humanize_timedelta(timedelta=step_delta) or "0s"
+            step_str = self._short_timedelta(step_delta)
 
             rows.append([f"Level {lvl}", date_str, total_str, step_str])
             prev_ts = ts 
@@ -499,7 +525,7 @@ class LevelUpTracker(commands.Cog):
             avg_seconds = sum(times) / len(times)
             
             avg_delta = timedelta(seconds=avg_seconds)
-            time_str = humanize_timedelta(timedelta=avg_delta) or "0s"
+            time_str = self._short_timedelta(avg_delta)
             
             rows.append([lvl, time_str, len(times)])
 
