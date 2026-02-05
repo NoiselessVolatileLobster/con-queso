@@ -380,33 +380,43 @@ class LevelUpTracker(commands.Cog):
         """
         Mass kick users who have been here for > X days and are level <= Y.
         
-        This uses Discord's native kick, not WarnSystem.
+        This uses WarnSystem (Level 3 Warning) to ensure proper logging.
         """
+        warn_cog = self.bot.get_cog("WarnSystem")
+        if not warn_cog:
+            return await ctx.send("The `WarnSystem` cog is not loaded. I cannot kick users via WarnSystem without it.")
+
         stagnant = await self._get_stagnant_members(ctx.guild, min_days, max_level)
         
         if not stagnant:
             return await ctx.send("No users found matching criteria.")
             
-        count = len(stagnant)
-        await ctx.send(f"Found {count} users matching criteria. **Kicking users now...**")
+        members_to_kick = [x[0] for x in stagnant]
+        count = len(members_to_kick)
         
-        success_count = 0
-        fail_count = 0
+        await ctx.send(f"Found {count} users matching criteria. **Starting kick process via WarnSystem...**")
         
-        for member, days, lvl in stagnant:
-            try:
-                await member.kick(reason=f"LevelUpTracker Audit: {reason} (Level {lvl}, {days} days)")
-                success_count += 1
-                # Sleep briefly to avoid aggressive ratelimits if list is huge
-                if success_count % 5 == 0:
-                    await asyncio.sleep(1)
-            except discord.Forbidden:
-                fail_count += 1
-            except Exception as e:
-                log.error(f"Failed to kick {member.id}: {e}")
-                fail_count += 1
-        
-        await ctx.send(f"Kick run complete.\nKicked: {success_count}\nFailed: {fail_count} (Check hierarchy/permissions)")
+        try:
+            api = warn_cog.api
+            
+            # Level 3 in WarnSystem corresponds to a Kick
+            failed = await api.warn(
+                guild=ctx.guild,
+                members=members_to_kick,
+                author=ctx.author,
+                level=3, 
+                reason=reason
+            )
+            
+            msg = f"Successfully processed kicks for {count} users."
+            if failed:
+                msg += f"\nFailed to kick {len(failed)} users (Permissions/Hierarchy issues)."
+            
+            await ctx.send(msg)
+            
+        except Exception as e:
+            log.exception("Error during mass kick in LevelUpTracker")
+            await ctx.send(f"An error occurred while kicking users: {e}")
 
     # --------------------------------------------------------------------------
     # Public Stats Commands
