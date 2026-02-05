@@ -1,0 +1,10 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "description": "Track user message and voice activity, and automate policing actions for inactive members with support for LevelUp, WarnSystem, and Hibernate.",
+    "install_msg": "ActivityTracker loaded. Configure the cog using `[p]activitytrackerset`.",
+    "name": "ActivityTracker",
+    "short": "Advanced activity tracking and inactivity policing.",
+    "requirements": [],
+    "tags": ["activity", "moderation", "tracking", "utility"],
+    "min_bot_version": "3.5.0"
+}

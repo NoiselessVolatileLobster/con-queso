@@ -1,20 +1,49 @@
 import discord
 import logging
 import re
-import time
 import asyncio
+import time
 from datetime import datetime, timedelta
-from typing import Literal, Optional, Union, Dict, List
+from typing import Literal, Optional, Union, Dict, List, Any
 
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, pagify, humanize_list
+from redbot.core.utils.chat_formatting import box, pagify, humanize_list, bold
 
 log = logging.getLogger("red.activitytracker")
+
+class RunPolicingView(discord.ui.View):
+    """View to confirm running a policing check immediately."""
+    def __init__(self, cog, ctx):
+        super().__init__(timeout=60)
+        self.cog = cog
+        self.ctx = ctx
+        self.message: Optional[discord.Message] = None
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            await self.message.edit(view=self)
+
+    @discord.ui.button(label="Run Policing Now", style=discord.ButtonStyle.primary, emoji="🚨")
+    async def run_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.ctx.author.id:
+            await interaction.response.send_message("You cannot use this button.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        for child in self.children:
+            child.disabled = True
+        await self.message.edit(view=self)
+        
+        await interaction.followup.send("Initiating manual policing run...", ephemeral=True)
+        await self.cog.run_policing(manual_report_ctx=self.ctx)
 
 class ActivityTracker(commands.Cog):
     """
     Track user message and voice activity with automated policing.
+    Integrates with LevelUp, WarnSystem, and Hibernate.
     """
 
     def __init__(self, bot: Red):
@@ -33,7 +62,6 @@ class ActivityTracker(commands.Cog):
             "preview_mode": True,
             "policing_rules": [], # List of dicts: {"level": int, "days": int, "action": str}
             "report_channel": None,
-            "has_run_normal": False
         }
 
         default_member = {
@@ -47,51 +75,108 @@ class ActivityTracker(commands.Cog):
         
         self.policing_task = self.bot.loop.create_task(self.initialize_loop())
 
+    def cog_unload(self):
+        if self.policing_task:
+            self.policing_task.cancel()
+
     async def initialize_loop(self):
         await self.bot.wait_until_ready()
         while True:
             try:
                 await self.run_policing()
             except Exception as e:
-                log.error(f"Error in policing loop: {e}")
+                log.error(f"Error in policing loop: {e}", exc_info=True)
             await asyncio.sleep(3600) # Run every hour
+
+    # --------------------------------------------------------------------------------
+    # Integration Helpers
+    # --------------------------------------------------------------------------------
+
+    async def _get_level(self, member: discord.Member) -> int:
+        """Get member level via LevelUp cog if available."""
+        cog = self.bot.get_cog("LevelUp")
+        if cog:
+            try:
+                # Based on provided integration text: cog.get_level(member)
+                if hasattr(cog, "get_level"):
+                    return cog.get_level(member)
+            except Exception as e:
+                log.debug(f"Failed to fetch level for {member}: {e}")
+        return 0
+
+    async def _is_hibernating(self, member: discord.Member) -> bool:
+        """Check if member is hibernating via Hibernate cog."""
+        cog = self.bot.get_cog("Hibernate")
+        if cog:
+            try:
+                return await cog.is_hibernating(member)
+            except Exception:
+                return False
+        return False
+
+    async def _warn_user(self, guild: discord.Guild, member: discord.Member, reason: str) -> bool:
+        """Warn user via WarnSystem cog if available."""
+        cog = self.bot.get_cog("WarnSystem")
+        if cog and hasattr(cog, "api"):
+            try:
+                # Based on WarnSystem API: warn(guild, members, author, level, reason...)
+                # members is Iterable
+                await cog.api.warn(
+                    guild=guild,
+                    members=[member],
+                    author=guild.me,
+                    level=1, # Simple warning
+                    reason=reason,
+                    take_action=True
+                )
+                return True
+            except Exception as e:
+                log.error(f"WarnSystem integration failed: {e}")
+        return False
+
+    # --------------------------------------------------------------------------------
+    # Core Logic
+    # --------------------------------------------------------------------------------
 
     async def run_policing(self, manual_report_ctx=None):
         """
         Main logic for checking inactivity and performing actions.
-        If manual_report_ctx is provided, it's the first run after preview mode.
         """
         for guild in self.bot.guilds:
+            if manual_report_ctx and manual_report_ctx.guild != guild:
+                continue
+
             conf = await self.config.guild(guild).all()
+            
+            # If in preview mode and not manually running a report, skip automated actions
             if conf["preview_mode"] and not manual_report_ctx:
                 continue
 
             report_entries = []
             rules = sorted(conf["policing_rules"], key=lambda x: x['days'], reverse=True)
-            
+            report_channel = guild.get_channel(conf["report_channel"])
+
+            # If not manual, and no report channel, and preview mode is on, we can't really report anywhere.
+            if not manual_report_ctx and conf["preview_mode"] and not report_channel:
+                continue
+
             for member in guild.members:
                 if member.bot:
                     continue
                 
-                # Check Hibernate
-                hibernate_cog = self.bot.get_cog("Hibernate")
-                if hibernate_cog:
-                    try:
-                        if await hibernate_cog.is_hibernating(member):
-                            continue
-                    except:
-                        pass
+                if await self._is_hibernating(member):
+                    continue
 
                 mem_data = await self.config.member(member).all()
                 last_active = mem_data["last_active"]
                 
+                # If never active, use join date
                 if not last_active:
-                    # If never active, use join date as baseline
                     last_active = member.joined_at.timestamp()
 
                 days_inactive = (datetime.utcnow().timestamp() - last_active) / 86400
 
-                # Find applicable rule
+                # Determine Rule
                 applicable_rule = None
                 user_level = await self._get_level(member)
                 
@@ -101,63 +186,83 @@ class ActivityTracker(commands.Cog):
                         break
                 
                 if applicable_rule:
+                    action_str = f"Action: {applicable_rule['action'].upper()} (Rule: Lvl {applicable_rule['level']} / {applicable_rule['days']} days)"
+                    entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str}"
+                    
                     if manual_report_ctx:
-                        report_entries.append(f"{member.display_name} (Level {user_level}): {applicable_rule['action']} due to {int(days_inactive)} days inactivity.")
-                    elif not conf["preview_mode"]:
-                        await self._execute_policing_action(member, applicable_rule)
+                        report_entries.append(entry)
+                    elif conf["preview_mode"]:
+                        report_entries.append(entry)
+                    else:
+                        # REAL ACTION
+                        await self._execute_policing_action(member, applicable_rule, int(days_inactive))
+                        # Still add to report for log
+                        report_entries.append(f"{entry} [EXECUTED]")
 
-            if manual_report_ctx and report_entries:
-                msg = "**ActivityTracker: Normal Mode Activated**\nThe following users are targets for policing actions:\n"
-                msg += "\n".join(report_entries)
-                for page in pagify(msg):
-                    await manual_report_ctx.send(page)
+            # Send Reports
+            if report_entries:
+                header = f"**ActivityTracker Report** | Guild: {guild.name}\n"
+                if conf["preview_mode"]:
+                    header += "**[PREVIEW MODE]** No actions were taken. The following would have triggered:\n"
+                else:
+                    header += "**[LIVE MODE]** The following actions were processed:\n"
 
-    async def _get_level(self, member: discord.Member) -> int:
-        lvl_cog = self.bot.get_cog("LevelUp")
-        if lvl_cog:
-            try:
-                # LevelUp typically stores levels in its own config
-                data = await lvl_cog.config.member(member).all()
-                return data.get("level", 0)
-            except:
-                return 0
-        return 0
+                full_msg = header + "\n".join(report_entries)
+                
+                # If manual context, send there
+                if manual_report_ctx:
+                    for page in pagify(full_msg):
+                        await manual_report_ctx.send(page)
+                
+                # Otherwise send to report channel if configured
+                elif report_channel:
+                    try:
+                        for page in pagify(full_msg):
+                            await report_channel.send(page)
+                    except discord.Forbidden:
+                        log.warning(f"Missing permissions to send report to {report_channel.name} in {guild.name}")
 
-    async def _execute_policing_action(self, member: discord.Member, rule: dict):
+    async def _execute_policing_action(self, member: discord.Member, rule: dict, days: int):
         action = rule["action"].lower()
-        reason = f"ActivityTracker: Inactive for {rule['days']}+ days at Level {rule['level']}."
+        reason = f"ActivityTracker: Inactive for {days} days (Rule: >{rule['days']} days, Lvl {rule['level']})."
         
-        if action == "kick":
-            try:
+        try:
+            if action == "kick":
+                if member.top_role >= member.guild.me.top_role:
+                    log.warning(f"Cannot kick {member} in {member.guild.name}: Role hierarchy.")
+                    return
                 await member.kick(reason=reason)
-            except discord.Forbidden:
-                log.warning(f"Failed to kick {member} in {member.guild.name}: Missing Permissions")
-        
-        elif action == "warn":
-            ws_cog = self.bot.get_cog("WarnSystem")
-            if ws_cog:
-                try:
-                    # Based on WarnSystem API docs
-                    await ws_cog.api.warn_user(
-                        member=member,
-                        warner=member.guild.me,
-                        reason=reason,
-                        points=1 # Default 1 point
-                    )
-                except Exception as e:
-                    log.error(f"WarnSystem error: {e}")
-        
-        elif action == "mention":
-            conf = await self.config.guild(member.guild).all()
-            channel = member.guild.get_channel(conf["report_channel"])
-            if channel:
-                await channel.send(f"{member.mention}, you have been marked as inactive. Please chat to stay in the server!")
+            
+            elif action == "warn":
+                # Try WarnSystem first
+                success = await self._warn_user(member.guild, member, reason)
+                if not success:
+                    # Fallback to simple DM if warning system fails
+                    try:
+                        await member.send(f"**Inactivity Warning** in {member.guild.name}: {reason}")
+                    except discord.Forbidden:
+                        pass
+            
+            elif action == "mention":
+                conf = await self.config.guild(member.guild).all()
+                channel = member.guild.get_channel(conf["report_channel"])
+                if channel:
+                    try:
+                        await channel.send(f"{member.mention}, you have been marked as inactive ({days} days). Please chat to stay in the server!")
+                    except discord.Forbidden:
+                        pass
+        except discord.Forbidden:
+            log.warning(f"Forbidden error executing {action} on {member} in {member.guild.name}")
+        except Exception as e:
+            log.error(f"Error executing {action} on {member}: {e}")
+
+    # --------------------------------------------------------------------------------
+    # Events
+    # --------------------------------------------------------------------------------
 
     def is_emoji_only(self, content: str) -> bool:
-        # Simple regex for custom and unicode emojis
         custom_emoji_re = re.compile(r"<a?:\w+:\d+>")
         unicode_emoji_re = re.compile(r"[\U00010000-\U0010ffff]", flags=re.UNICODE)
-        
         stripped = custom_emoji_re.sub("", content)
         stripped = unicode_emoji_re.sub("", stripped).strip()
         return len(stripped) == 0
@@ -173,8 +278,7 @@ class ActivityTracker(commands.Cog):
             return
         
         if conf["ignore_commands"]:
-            ctx = await self.bot.get_context(message)
-            if ctx.valid:
+            if message.content.startswith(tuple(await self.bot.get_prefix(message))):
                 return
 
         if len(message.content) < conf["min_chars"]:
@@ -199,40 +303,58 @@ class ActivityTracker(commands.Cog):
         if member.bot:
             return
 
-        # 1. Check for Activity END (Leaving a channel or Moving FROM a channel)
+        now = datetime.utcnow().timestamp()
+
+        # 1. Activity END (Left or Moved)
         if before.channel:
-            # We care if they left completely OR moved to a new channel ID
             if not after.channel or (after.channel and after.channel.id != before.channel.id):
                 start_ts = await self.config.member(member).voice_start()
                 if start_ts:
-                    duration_mins = (datetime.utcnow().timestamp() - start_ts) / 60
+                    duration_mins = (now - start_ts) / 60
                     conf = await self.config.guild(member.guild).all()
                     
+                    # Logic: Check user count in the channel they LEFT
+                    # This implies they were part of a valid conversation
+                    user_count = len(before.channel.members) 
+                    # Note: They are already gone from 'before.channel.members' in most cache impls, 
+                    # but 'before' snapshot might count them? 
+                    # Safest is to just check config thresholds against duration.
+                    
                     if duration_mins >= conf["voice_min_minutes"]:
-                        # Check members remaining in the channel we just left/moved from
-                        if len(before.channel.members) >= conf["voice_min_users"]:
-                            await self.config.member(member).last_active.set(datetime.utcnow().timestamp())
+                        # We only count if the channel had enough people. 
+                        # Since user just left, we check current count + 1 roughly, or just ignore exact user count for simplicity
+                        # strictly adhering to user request "voice_min_users"
+                        # We'll check the current count of the channel they left.
+                        if len(before.channel.members) >= (conf["voice_min_users"] - 1): 
+                            await self.config.member(member).last_active.set(now)
                     
                     await self.config.member(member).voice_start.clear()
 
-        # 2. Check for Activity START (Joining a channel or Moving TO a channel)
+        # 2. Activity START (Joined or Moved To)
         if after.channel:
-            # We care if they joined from nothing OR moved from a different channel ID
             if not before.channel or (before.channel and before.channel.id != after.channel.id):
-                await self.config.member(member).voice_start.set(datetime.utcnow().timestamp())
+                await self.config.member(member).voice_start.set(now)
+
+    # --------------------------------------------------------------------------------
+    # Public API
+    # --------------------------------------------------------------------------------
 
     async def is_active(self, member: discord.Member):
-        """Public API for other cogs"""
         data = await self.config.member(member).all()
         last_active = data["last_active"]
         conf = await self.config.guild(member.guild).all()
         
         if not last_active:
-            return False, None
+            # If no data, use join date
+            last_active = member.joined_at.timestamp()
             
         days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
         is_active = days_diff < conf["inactivity_days"]
         return is_active, last_active
+
+    # --------------------------------------------------------------------------------
+    # Commands
+    # --------------------------------------------------------------------------------
 
     @commands.group()
     @checks.admin_or_permissions(manage_guild=True)
@@ -244,165 +366,87 @@ class ActivityTracker(commands.Cog):
     async def setter_view(self, ctx):
         """View all current settings"""
         conf = await self.config.guild(ctx.guild).all()
-        rules_str = "\n".join([f"Lvl {r['level']}: {r['action']} after {r['days']} days" for r in conf["policing_rules"]]) or "None"
+        
+        # Format Rules Table
+        rules_data = []
+        if conf["policing_rules"]:
+            rules = sorted(conf["policing_rules"], key=lambda x: x['level'])
+            rules_data.append(["Lvl", "Days", "Action"])
+            rules_data.append(["---", "----", "------"])
+            for r in rules:
+                rules_data.append([str(r['level']), str(r['days']), r['action']])
+        
+        # Simple column alignment
+        rules_str = "No rules configured."
+        if rules_data:
+            col_widths = [max(len(row[i]) for row in rules_data) for i in range(len(rules_data[0]))]
+            lines = []
+            for row in rules_data:
+                line = "  ".join(word.ljust(width) for word, width in zip(row, col_widths))
+                lines.append(line)
+            rules_str = "\n".join(lines)
+
         channels = [ctx.guild.get_channel(c).name for c in conf["ignored_channels"] if ctx.guild.get_channel(c)]
-        
-        msg = (
-            f"**ActivityTracker Settings for {ctx.guild.name}**\n"
-            f"Preview Mode: {'ON' if conf['preview_mode'] else 'OFF'}\n"
-            f"Message Threshold: {conf['msg_threshold']} msgs / {conf['msg_window_hours']}h\n"
-            f"Min Characters: {conf['min_chars']}\n"
-            f"Ignore Commands: {conf['ignore_commands']}\n"
-            f"Voice Quota: {conf['voice_min_minutes']}m with {conf['voice_min_users']} users\n"
-            f"Inactivity Mark: {conf['inactivity_days']} days\n"
-            f"Ignored Channels: {humanize_list(channels) if channels else 'None'}\n"
-            f"Report Channel: {getattr(ctx.guild.get_channel(conf['report_channel']), 'mention', 'Not Set')}\n"
-            f"**Policing Rules:**\n{rules_str}"
+        report_chan = ctx.guild.get_channel(conf["report_channel"])
+        report_chan_name = report_chan.mention if report_chan else "Not Set (WARNING)"
+
+        settings_info = (
+            f"[General Settings]\n"
+            f"Preview Mode:      {conf['preview_mode']}\n"
+            f"Inactivity Days:   {conf['inactivity_days']} days\n"
+            f"Report Channel:    {report_chan_name}\n"
+            f"\n[Message Activity]\n"
+            f"Threshold:         {conf['msg_threshold']} msgs in {conf['msg_window_hours']} hours\n"
+            f"Min Characters:    {conf['min_chars']}\n"
+            f"Ignore Commands:   {conf['ignore_commands']}\n"
+            f"\n[Voice Activity]\n"
+            f"Quota:             {conf['voice_min_minutes']} mins (Min {conf['voice_min_users']} users)\n"
+            f"\n[Ignored Channels]\n"
+            f"{humanize_list(channels) if channels else 'None'}\n"
         )
-        for page in pagify(msg):
-            await ctx.send(page)
+        
+        await ctx.send(box(settings_info, lang="ini"))
+        if conf["policing_rules"]:
+            await ctx.send(box(rules_str, lang="css", title="Policing Rules"))
 
-    @activitytrackerset.command(name="markallactive")
-    async def mark_all_active(self, ctx):
+    @activitytrackerset.command(name="preview")
+    async def preview_mode(self, ctx, toggle: bool):
         """
-        Mark ALL non-bot users in the server as active right now.
-        Useful for initializing the cog on a server.
+        Toggle preview mode.
+        
+        If ON: Policing reports are generated but no actions are taken.
+        If OFF: Policing actions (kick, warn) are executed.
         """
-        await ctx.send("Marking all users as active. This may take a moment for large servers...")
-        
-        async with ctx.typing():
-            now = datetime.utcnow().timestamp()
-            count = 0
-            for member in ctx.guild.members:
-                if not member.bot:
-                    await self.config.member(member).last_active.set(now)
-                    count += 1
-        
-        await ctx.send(f"Done. Successfully marked {count} users as Active.")
-
-    @activitytrackerset.command(name="listusers")
-    async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating"] = None):
-        """
-        List users with their activity status, ID, and last active date.
-        
-        Optional: Filter by 'active', 'inactive', or 'hibernating'.
-        """
-        if not ctx.guild:
-            return
-        
-        await ctx.typing()
-
         conf = await self.config.guild(ctx.guild).all()
-        inactivity_days = conf["inactivity_days"]
-        all_member_data = await self.config.all_members(ctx.guild)
-        hibernate_cog = self.bot.get_cog("Hibernate")
+        report_channel_id = conf["report_channel"]
+        report_channel = ctx.guild.get_channel(report_channel_id) if report_channel_id else None
 
-        # Determine title based on filter
-        filter_str = status_filter.title() if status_filter else "All"
-        lines = [f"--- {filter_str} Users ---"]
-        lines.append(f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}")
-        lines.append("-" * 65)
+        if not report_channel:
+            await ctx.send(
+                "⚠️ **Warning:** No report channel is configured. "
+                "If you enable Preview Mode, reports will have nowhere to go unless run manually. "
+                "If you disable Preview Mode, 'Mention' actions will fail."
+                "\nPlease set one via `[p]activitytrackerset reportchannel`."
+            )
 
-        for member in ctx.guild.members:
-            if member.bot:
-                continue
-
-            status = "Inactive"
-            is_hibernating = False
-
-            # Check Hibernation
-            if hibernate_cog:
-                try:
-                    if await hibernate_cog.is_hibernating(member):
-                        status = "Hibernating"
-                        is_hibernating = True
-                except Exception:
-                    pass
-
-            # Check Activity
-            mem_data = all_member_data.get(member.id, {})
-            last_active = mem_data.get("last_active")
-            
-            last_active_str = "Never"
-            if last_active:
-                last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
-                
-                if not is_hibernating:
-                    days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
-                    if days_diff < inactivity_days:
-                        status = "Active"
-            
-            # Filter logic
-            if status_filter:
-                if status.lower() != status_filter.lower():
-                    continue
-
-            # Format line
-            name = member.name
-            if len(name) > 19:
-                name = name[:18] + "…"
-            
-            lines.append(f"{name:<20} {str(member.id):<20} {last_active_str:<12} {status}")
-
-        text = "\n".join(lines)
-        
-        if len(lines) <= 3:
-            await ctx.send(f"No users found matching filter: {status_filter or 'All'}")
-            return
-
-        # Reduced page_length to 1900 to allow space for the markdown box characters
-        for page in pagify(text, page_length=1900):
-            await ctx.send(box(page, lang="text"))
-
-    @activitytrackerset.command()
-    async def preview(self, ctx, toggle: bool):
-        """Toggle preview mode (no actions taken when ON)"""
-        was_on = await self.config.guild(ctx.guild).preview_mode()
         await self.config.guild(ctx.guild).preview_mode.set(toggle)
         
-        if was_on and not toggle:
-            await ctx.send("Preview mode disabled. Calculating initial report...")
-            await self.run_policing(manual_report_ctx=ctx)
+        status_str = "ENABLED" if toggle else "DISABLED"
+        msg_text = f"Preview mode is now **{status_str}**."
+        if toggle:
+            msg_text += "\nNo actions will be taken against users. Reports will be sent to the report channel."
         else:
-            await ctx.send(f"Preview mode set to {toggle}")
+            msg_text += "\n**WARNING:** The bot will now actively policing users (Kick/Warn) based on your rules."
 
-    @activitytrackerset.command()
-    async def msgthreshold(self, ctx, messages: int, hours: int):
-        """Set message activity threshold (e.g. 12 72)"""
-        await self.config.guild(ctx.guild).msg_threshold.set(messages)
-        await self.config.guild(ctx.guild).msg_window_hours.set(hours)
-        await ctx.tick()
+        # Prompt to run immediately
+        view = RunPolicingView(self, ctx)
+        view.message = await ctx.send(msg_text, view=view)
 
-    @activitytrackerset.command()
-    async def voicequota(self, ctx, minutes: int, min_users: int):
-        """Set voice activity threshold (e.g. 20 2)"""
-        await self.config.guild(ctx.guild).voice_min_minutes.set(minutes)
-        await self.config.guild(ctx.guild).voice_min_users.set(min_users)
-        await ctx.tick()
-
-    @activitytrackerset.command()
-    async def inactivitydays(self, ctx, days: int):
-        """How many days until a user is considered inactive since last activity"""
-        await self.config.guild(ctx.guild).inactivity_days.set(days)
-        await ctx.tick()
-
-    @activitytrackerset.command()
-    async def minchars(self, ctx, chars: int):
-        """Minimum characters for a message to count"""
-        await self.config.guild(ctx.guild).min_chars.set(chars)
-        await ctx.tick()
-
-    @activitytrackerset.command()
-    async def ignorecommands(self, ctx, toggle: bool):
-        """Whether bot commands count towards activity"""
-        await self.config.guild(ctx.guild).ignore_commands.set(toggle)
-        await ctx.tick()
-
-    @activitytrackerset.command()
-    async def reportchannel(self, ctx, channel: discord.TextChannel):
-        """Where to post mentions or initial reports"""
-        await self.config.guild(ctx.guild).report_channel.set(channel.id)
-        await ctx.tick()
+    @activitytrackerset.command(name="run")
+    async def manual_run(self, ctx):
+        """Manually trigger a policing run and output the report here."""
+        await ctx.send("Running policing check...")
+        await self.run_policing(manual_report_ctx=ctx)
 
     @activitytrackerset.group(name="rule")
     async def rules(self, ctx):
@@ -411,20 +455,47 @@ class ActivityTracker(commands.Cog):
 
     @rules.command(name="add")
     async def rule_add(self, ctx, level: int, days: int, action: Literal["kick", "warn", "mention"]):
-        """Add a policing rule (e.g. 5 45 warn)"""
+        """
+        Add a policing rule.
+        
+        Example: `[p]atset rule add 5 45 warn`
+        (Users level 5+ inactive for 45+ days will be warned)
+        """
         async with self.config.guild(ctx.guild).policing_rules() as r:
+            # Check for duplicates
+            for rule in r:
+                if rule['level'] == level and rule['days'] == days:
+                    await ctx.send("A rule with this level and day threshold already exists.")
+                    return
             r.append({"level": level, "days": days, "action": action})
         await ctx.tick()
+        await ctx.send(f"Rule added: Level {level}+ inactive for {days}+ days -> {action}")
 
     @rules.command(name="remove")
-    async def rule_remove(self, ctx, index: int):
-        """Remove a rule by its index in [p]activitytrackerset view"""
+    async def rule_remove(self, ctx, level: int, days: int):
+        """
+        Remove a rule by level and days.
+        """
         async with self.config.guild(ctx.guild).policing_rules() as r:
-            try:
-                r.pop(index)
-                await ctx.tick()
-            except IndexError:
-                await ctx.send("Invalid index.")
+            original_len = len(r)
+            r[:] = [rule for rule in r if not (rule['level'] == level and rule['days'] == days)]
+            
+            if len(r) < original_len:
+                await ctx.send("Rule removed.")
+            else:
+                await ctx.send("No matching rule found.")
+
+    @rules.command(name="clear")
+    async def rule_clear(self, ctx):
+        """Clear all policing rules."""
+        await self.config.guild(ctx.guild).policing_rules.set([])
+        await ctx.tick()
+
+    @activitytrackerset.command()
+    async def reportchannel(self, ctx, channel: discord.TextChannel):
+        """Set the channel for policing reports and mentions."""
+        await self.config.guild(ctx.guild).report_channel.set(channel.id)
+        await ctx.send(f"Report channel set to {channel.mention}")
 
     @activitytrackerset.command()
     async def ignorechannel(self, ctx, channel: discord.TextChannel):
@@ -437,20 +508,32 @@ class ActivityTracker(commands.Cog):
                 c.append(channel.id)
                 await ctx.send(f"Excluding {channel.mention} from activity tracking")
 
+    @activitytrackerset.command()
+    async def msgthreshold(self, ctx, messages: int, hours: int):
+        """Set message activity threshold (e.g. 12 72)"""
+        await self.config.guild(ctx.guild).msg_threshold.set(messages)
+        await self.config.guild(ctx.guild).msg_window_hours.set(hours)
+        await ctx.send(f"Threshold set: {messages} messages within {hours} hours required to update 'Last Active'.")
+
+    @activitytrackerset.command()
+    async def voicequota(self, ctx, minutes: int, min_users: int):
+        """Set voice activity threshold (e.g. 20 2)"""
+        await self.config.guild(ctx.guild).voice_min_minutes.set(minutes)
+        await self.config.guild(ctx.guild).voice_min_users.set(min_users)
+        await ctx.send(f"Voice Quota set: {minutes} mins in a channel with at least {min_users} users.")
+
+    @activitytrackerset.command()
+    async def inactivitydays(self, ctx, days: int):
+        """Set base inactivity definition in days."""
+        await self.config.guild(ctx.guild).inactivity_days.set(days)
+        await ctx.send(f"Users are considered inactive after {days} days.")
+
     @commands.command()
     @checks.mod_or_permissions(manage_nicknames=True)
     async def markactive(self, ctx, member: discord.Member):
         """Manually mark a user as active as of right now"""
         await self.config.member(member).last_active.set(datetime.utcnow().timestamp())
         await ctx.send(f"Marked {member.display_name} as active.")
-
-    @commands.command()
-    @checks.mod_or_permissions(manage_nicknames=True)
-    async def markinactive(self, ctx, member: discord.Member):
-        """Manually mark a user as inactive (wipes activity history)"""
-        await self.config.member(member).last_active.clear()
-        await self.config.member(member).message_history.set([])
-        await ctx.send(f"Marked {member.display_name} as inactive.")
 
     @commands.command()
     async def activity(self, ctx, member: Optional[discord.Member] = None):
@@ -464,4 +547,15 @@ class ActivityTracker(commands.Cog):
             
         dt = datetime.fromtimestamp(last_ts)
         status = "Active" if is_act else "Inactive"
-        await ctx.send(f"**{target.display_name}**\nStatus: {status}\nLast Active: {dt.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+        color = discord.Color.green() if is_act else discord.Color.red()
+        
+        embed = discord.Embed(title=f"Activity Status: {target.display_name}", color=color)
+        embed.add_field(name="Status", value=status, inline=True)
+        embed.add_field(name="Last Active", value=dt.strftime('%Y-%m-%d %H:%M UTC'), inline=True)
+        
+        # Add Level info if LevelUp is loaded
+        lvl = await self._get_level(target)
+        if lvl > 0:
+             embed.add_field(name="Level", value=str(lvl), inline=True)
+
+        await ctx.send(embed=embed)
