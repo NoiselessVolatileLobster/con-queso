@@ -1,0 +1,15 @@
+{
+    "author": [
+        "NoiselessVolatileLobster"
+    ],
+    "name": "LevelUpTracker",
+    "short": "Track leveling speeds and audit stagnant users.",
+    "description": "Tracks how long users take to level up using VertyCo's LevelUp cog, and provides tools to audit, warn, or kick stagnant users.",
+    "tags": [
+        "levelup",
+        "stats",
+        "utility",
+        "moderation"
+    ],
+    "end_user_data_statement": "This cog stores user IDs, join timestamps, and timestamps of when users reached specific levels for statistical tracking."
+}
