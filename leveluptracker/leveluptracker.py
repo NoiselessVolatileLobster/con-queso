@@ -67,8 +67,19 @@ class LevelUpTracker(commands.Cog):
         return " ".join(parts[:2])
 
     # --------------------------------------------------------------------------
-    # Helper: Table Formatting
+    # Helper: Table Formatting & Sanitation
     # --------------------------------------------------------------------------
+    def _sanitize_name(self, name: str) -> str:
+        """
+        Removes non-ASCII characters (like emojis) to ensure table alignment.
+        Returns the stripped string, or "Unknown" if the result is empty.
+        """
+        if name.isascii():
+             return name
+        # Strip non-ascii chars that mess up width calculations
+        clean = name.encode("ascii", "ignore").decode("ascii").strip()
+        return clean if clean else "Unknown"
+
     def _make_table(self, headers: list, rows: list) -> str:
         """
         Creates a formatted table resembling the preferred style.
@@ -299,7 +310,9 @@ class LevelUpTracker(commands.Cog):
             headers = ["Member", "ID", "Days", "Level"]
             rows = []
             for m, days, lvl in stagnant:
-                rows.append([m.display_name, str(m.id), str(days), str(lvl)])
+                # Sanitize display name for table
+                safe_name = self._sanitize_name(m.display_name)
+                rows.append([safe_name, str(m.id), str(days), str(lvl)])
             
             table = self._make_table(headers, rows)
             
@@ -527,7 +540,12 @@ class LevelUpTracker(commands.Cog):
             
             for i, (user_id, time_seconds) in enumerate(entries, 1):
                 member = ctx.guild.get_member(user_id)
-                name = member.display_name if member else f"<{user_id}>"
+                if member:
+                    name = self._sanitize_name(member.display_name)
+                    if not name:
+                         name = str(member.id)
+                else:
+                    name = f"<{user_id}>"
                 
                 time_str = self._short_timedelta(timedelta(seconds=time_seconds))
                 rows.append([f"#{i}", name, time_str])
