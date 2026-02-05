@@ -477,14 +477,75 @@ class LevelUpTracker(commands.Cog):
 
     @commands.command()
     @commands.guild_only()
-    async def levelaverages(self, ctx):
+    async def levelaverages(self, ctx, level: Optional[int] = None):
         """
         Average time for NEW users to reach levels (from Join).
         Excludes users who were already leveled when tracking started.
-        """
-        level_times = {} 
         
+        If a level is provided (e.g. `[p]levelaverages 5`), lists the times 
+        for all users who reached that specific level.
+        """
         all_members = await self.config.all_members(ctx.guild)
+        
+        if level is not None:
+            # ------------------------------------------------------------------
+            # DETAILED VIEW FOR SPECIFIC LEVEL
+            # ------------------------------------------------------------------
+            if level <= 0:
+                 return await ctx.send("Please provide a level greater than 0.")
+                 
+            entries = [] # List of (user_id, time_seconds)
+            
+            for user_id, data in all_members.items():
+                initial_level = data.get("initial_level")
+                
+                # Strict Filter: New Users Only
+                if initial_level is not None and initial_level > 0:
+                    continue
+                
+                join_ts = data.get("join_timestamp")
+                levels = data.get("levels", {})
+                
+                if not join_ts:
+                    continue
+                    
+                lvl_str = str(level)
+                if lvl_str in levels:
+                    reached_ts = levels[lvl_str]
+                    delta = reached_ts - join_ts
+                    if delta > 0:
+                        entries.append((user_id, delta))
+            
+            if not entries:
+                return await ctx.send(f"No new users have reached **Level {level}** yet.")
+            
+            # Sort by time (fastest first)
+            entries.sort(key=lambda x: x[1])
+            
+            headers = ["Rank", "Member", "Time"]
+            rows = []
+            
+            for i, (user_id, time_seconds) in enumerate(entries, 1):
+                member = ctx.guild.get_member(user_id)
+                name = member.display_name if member else f"<{user_id}>"
+                
+                time_str = self._short_timedelta(timedelta(seconds=time_seconds))
+                rows.append([f"#{i}", name, time_str])
+                
+            table = self._make_table(headers, rows)
+            
+            heading = f"**Level {level} Records (New Users Only)**\nTotal Records: {len(entries)}"
+            
+            for page in pagify(table, page_length=1900):
+                await ctx.send(f"{heading}\n" + box(page, lang="prolog"))
+                heading = "" # Only show heading on first page
+            
+            return
+
+        # ----------------------------------------------------------------------
+        # SUMMARY VIEW (AGGREGATES)
+        # ----------------------------------------------------------------------
+        level_times = {} 
         
         skipped_legacy = 0
         included_users = 0
@@ -535,7 +596,6 @@ class LevelUpTracker(commands.Cog):
             
             # Mode
             # Bucket by day (round up/ceil) so partial days count towards the next full day.
-            # This makes finding a 'Mode' possible for timestamps.
             day_buckets = [math.ceil(t / 86400) for t in times]
             
             try:
