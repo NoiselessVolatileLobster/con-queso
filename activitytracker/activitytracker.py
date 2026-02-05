@@ -418,6 +418,91 @@ class ActivityTracker(commands.Cog):
         if conf["policing_rules"]:
             await ctx.send(box(rules_str, lang="css", title="Policing Rules"))
 
+    @activitytrackerset.command(name="listusers")
+    async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating"] = None):
+        """
+        List users with their activity status, ID, and last active date.
+        
+        Optional: Filter by 'active', 'inactive', or 'hibernating'.
+        """
+        if not ctx.guild:
+            return
+        
+        await ctx.typing()
+
+        conf = await self.config.guild(ctx.guild).all()
+        inactivity_days = conf["inactivity_days"]
+        # optimization: fetch all member data at once
+        all_member_data = await self.config.all_members(ctx.guild)
+        
+        # Determine title based on filter
+        filter_str = status_filter.title() if status_filter else "All"
+        lines = [f"--- {filter_str} Users ---"]
+        lines.append(f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}")
+        lines.append("-" * 65)
+
+        for member in ctx.guild.members:
+            if member.bot:
+                continue
+
+            status = "Inactive"
+            is_hibernating = await self._is_hibernating(member)
+            if is_hibernating:
+                status = "Hibernating"
+
+            # Check Activity
+            mem_data = all_member_data.get(member.id, {})
+            last_active = mem_data.get("last_active")
+            
+            last_active_str = "Never"
+            if last_active:
+                last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
+                
+                # If they are hibernating, status is already "Hibernating"
+                if not is_hibernating:
+                    days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
+                    if days_diff < inactivity_days:
+                        status = "Active"
+            
+            # Filter logic
+            if status_filter:
+                if status.lower() != status_filter.lower():
+                    continue
+
+            # Format line
+            name = member.name
+            if len(name) > 19:
+                name = name[:18] + "…"
+            
+            lines.append(f"{name:<20} {str(member.id):<20} {last_active_str:<12} {status}")
+
+        text = "\n".join(lines)
+        
+        if len(lines) <= 3:
+            await ctx.send(f"No users found matching filter: {status_filter or 'All'}")
+            return
+
+        for page in pagify(text, page_length=1900):
+            await ctx.send(box(page, lang="text"))
+
+    @activitytrackerset.command(name="markallactive")
+    async def mark_all_active(self, ctx):
+        """
+        Mark ALL non-bot users in the server as active right now.
+        Useful for initializing the cog on a server.
+        """
+        await ctx.send("Marking all users as active. This may take a moment for large servers...")
+        
+        async with ctx.typing():
+            now = datetime.utcnow().timestamp()
+            count = 0
+            for member in ctx.guild.members:
+                if not member.bot:
+                    await self.config.member(member).last_active.set(now)
+                    count += 1
+        
+        await ctx.send(f"Done. Successfully marked {count} users as Active.")
+
     @activitytrackerset.command(name="preview")
     async def preview_mode(self, ctx, toggle: bool):
         """
