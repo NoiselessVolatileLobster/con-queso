@@ -258,7 +258,7 @@ class LevelUpTracker(commands.Cog):
         ]
         
         table = self._make_table(headers, rows)
-        await ctx.send(box(table, lang="txt"))
+        await ctx.send(box(table, lang="prolog"))
 
     @leveluptrackerset.command(name="reindex")
     async def leveluptrackerset_reindex(self, ctx):
@@ -304,7 +304,7 @@ class LevelUpTracker(commands.Cog):
             msg = f"**Audit List**\nCriteria: {min_days}+ days on server, Level {max_level} or lower.\nFound {len(stagnant)} users."
             
             for page in pagify(table, page_length=1900):
-                await ctx.send(box(page, lang="txt"))
+                await ctx.send(box(page, lang="prolog"))
             await ctx.send(msg)
 
     @leveluptrackerset_audit.command(name="warn")
@@ -471,7 +471,7 @@ class LevelUpTracker(commands.Cog):
         if initial_level > 0:
             info_text += "*Time from Start counts from when the bot first saw this user at their initial level.\n"
             
-        await ctx.send(info_text + box(table, lang="txt"))
+        await ctx.send(info_text + "\n\n" + box(table, lang="prolog"))
 
     @commands.command()
     @commands.guild_only()
@@ -530,4 +530,4 @@ class LevelUpTracker(commands.Cog):
             rows.append([lvl, time_str, len(times)])
 
         table = self._make_table(headers, rows)
-        await ctx.send(f"**Average Leveling Speed (New Users Only)**\nBased on {included_users} new members.\n" + box(table, lang="txt"))
+        await ctx.send(f"**Average Leveling Speed (New Users Only)**\nBased on {included_users} new members.\n\n" + box(table, lang="prolog"))
