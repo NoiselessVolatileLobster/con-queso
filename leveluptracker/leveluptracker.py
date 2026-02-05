@@ -3,6 +3,7 @@ import logging
 import inspect
 import asyncio
 import statistics
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, List, Tuple
 
@@ -533,18 +534,19 @@ class LevelUpTracker(commands.Cog):
             median_str = self._short_timedelta(timedelta(seconds=median_seconds))
             
             # Mode
-            # For time data, raw mode is usually meaningless if it's float timestamps.
-            # We will round to integer seconds first to have a chance of matching.
-            int_times = [int(t) for t in times]
+            # Bucket by day (round up/ceil) so partial days count towards the next full day.
+            # This makes finding a 'Mode' possible for timestamps.
+            day_buckets = [math.ceil(t / 86400) for t in times]
+            
             try:
                 # statistics.mode raises error if no unique mode in older python,
                 # or returns first mode in 3.8+.
                 # If all values are unique, mode is not useful.
-                if len(set(int_times)) == len(int_times):
+                if len(set(day_buckets)) == len(day_buckets):
                     mode_str = "-"
                 else:
-                    mode_seconds = statistics.mode(int_times)
-                    mode_str = self._short_timedelta(timedelta(seconds=mode_seconds))
+                    mode_days = statistics.mode(day_buckets)
+                    mode_str = f"{mode_days}d"
             except statistics.StatisticsError:
                 mode_str = "-"
             
