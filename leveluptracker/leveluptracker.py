@@ -458,7 +458,7 @@ class LevelUpTracker(commands.Cog):
             else:
                 start_ts = levels.get(str(initial_level), join_ts)
                 total_delta = current_dt - datetime.fromtimestamp(start_ts, timezone.utc)
-                total_str = self._short_timedelta(total_delta) + "*"
+                total_str = self._short_timedelta(total_delta) + "^"
 
             # 2. Time from Previous
             step_delta = current_dt - datetime.fromtimestamp(prev_ts, timezone.utc)
@@ -469,7 +469,7 @@ class LevelUpTracker(commands.Cog):
 
         table = self._make_table(headers, rows)
         if initial_level > 0:
-            info_text += "*Time from Start counts from when the bot first saw this user at their initial level.\n"
+            info_text += "Note: ^ Time from Start counts from when the bot first saw this user at their initial level.\n"
             
         await ctx.send(info_text + "\n\n" + box(table, lang="prolog"))
 
