@@ -2,6 +2,7 @@ import discord
 import logging
 import inspect
 import asyncio
+import statistics
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, List, Tuple
 
@@ -517,17 +518,37 @@ class LevelUpTracker(commands.Cog):
                 msg += f"\n(Skipped {skipped_legacy} legacy users who started > Level 0)."
             return await ctx.send(msg)
 
-        headers = ["Level", "Avg Time (From Join)", "Sample Size"]
+        headers = ["Level", "Mean", "Median", "Mode", "Count"]
         rows = []
 
         for lvl in sorted(level_times.keys()):
             times = level_times[lvl]
-            avg_seconds = sum(times) / len(times)
             
-            avg_delta = timedelta(seconds=avg_seconds)
-            time_str = self._short_timedelta(avg_delta)
+            # Mean
+            mean_seconds = statistics.mean(times)
+            mean_str = self._short_timedelta(timedelta(seconds=mean_seconds))
             
-            rows.append([lvl, time_str, len(times)])
+            # Median
+            median_seconds = statistics.median(times)
+            median_str = self._short_timedelta(timedelta(seconds=median_seconds))
+            
+            # Mode
+            # For time data, raw mode is usually meaningless if it's float timestamps.
+            # We will round to integer seconds first to have a chance of matching.
+            int_times = [int(t) for t in times]
+            try:
+                # statistics.mode raises error if no unique mode in older python,
+                # or returns first mode in 3.8+.
+                # If all values are unique, mode is not useful.
+                if len(set(int_times)) == len(int_times):
+                    mode_str = "-"
+                else:
+                    mode_seconds = statistics.mode(int_times)
+                    mode_str = self._short_timedelta(timedelta(seconds=mode_seconds))
+            except statistics.StatisticsError:
+                mode_str = "-"
+            
+            rows.append([lvl, mean_str, median_str, mode_str, len(times)])
 
         table = self._make_table(headers, rows)
-        await ctx.send(f"**Average Leveling Speed (New Users Only)**\nBased on {included_users} new members.\n\n" + box(table, lang="prolog"))
+        await ctx.send(f"**Leveling Speed Statistics (New Users Only)**\nBased on {included_users} new members.\n\n" + box(table, lang="prolog"))
