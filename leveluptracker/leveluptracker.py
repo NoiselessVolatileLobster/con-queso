@@ -3,7 +3,6 @@ import logging
 import inspect
 import asyncio
 import statistics
-import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, List, Tuple
 
@@ -186,6 +185,16 @@ class LevelUpTracker(commands.Cog):
         await member_conf.initial_level.set(0)
 
     @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        """
+        When a user leaves the server, remove their data.
+        This ensures averages only reflect current members.
+        """
+        if member.bot:
+            return
+        await self.config.member(member).clear()
+
+    @commands.Cog.listener()
     async def on_member_levelup(
         self,
         guild: discord.Guild,
@@ -279,6 +288,29 @@ class LevelUpTracker(commands.Cog):
         await ctx.send("Starting manual re-index of members...")
         await self._initialize_guild(ctx.guild)
         await ctx.send("Re-index complete.")
+
+    @leveluptrackerset.command(name="cleanup")
+    async def leveluptrackerset_cleanup(self, ctx):
+        """
+        Manually clean up data for users who are no longer in the server.
+        
+        This is useful if the bot was down when users left, or for cleaning
+        up old data from before the auto-cleanup feature was added.
+        """
+        async with ctx.typing():
+            all_members = await self.config.all_members(ctx.guild)
+            to_delete = []
+            
+            # Identify IDs that are in config but not in guild
+            for user_id in all_members:
+                if not ctx.guild.get_member(user_id):
+                    to_delete.append(user_id)
+            
+            # Perform deletion
+            for user_id in to_delete:
+                await self.config.member_from_ids(ctx.guild.id, user_id).clear()
+                
+            await ctx.send(f"Cleanup complete. Removed data for {len(to_delete)} users who are no longer in the server.")
 
     # --------------------------------------------------------------------------
     # Audit Commands
@@ -608,7 +640,8 @@ class LevelUpTracker(commands.Cog):
                 msg += f"\n(Skipped {skipped_legacy} legacy users who started > Level 0)."
             return await ctx.send(msg)
 
-        headers = ["Level", "Mean", "Median", "Mode", "Count"]
+        # Removed "Mode" from headers as requested
+        headers = ["Level", "Mean", "Median", "Count"]
         rows = []
 
         for lvl in sorted(level_times.keys()):
@@ -622,23 +655,11 @@ class LevelUpTracker(commands.Cog):
             median_seconds = statistics.median(times)
             median_str = self._short_timedelta(timedelta(seconds=median_seconds))
             
-            # Mode
-            # Bucket by day (round up/ceil) so partial days count towards the next full day.
-            day_buckets = [math.ceil(t / 86400) for t in times]
+            # Mode removed
             
-            try:
-                # statistics.mode raises error if no unique mode in older python,
-                # or returns first mode in 3.8+.
-                # If all values are unique, mode is not useful.
-                if len(set(day_buckets)) == len(day_buckets):
-                    mode_str = "-"
-                else:
-                    mode_days = statistics.mode(day_buckets)
-                    mode_str = f"{mode_days}d"
-            except statistics.StatisticsError:
-                mode_str = "-"
-            
-            rows.append([lvl, mean_str, median_str, mode_str, len(times)])
+            rows.append([lvl, mean_str, median_str, len(times)])
 
         table = self._make_table(headers, rows)
-        await ctx.send(f"**Leveling Speed Statistics (New Users Only)**\nBased on {included_users} new members.\n\n" + box(table, lang="prolog"))
+        
+        # Updated Title Wording
+        await ctx.send(f"**LevelUp Averages (From 2026-01-01)**\nBased on {included_users} new members.\n\n" + box(table, lang="prolog"))
