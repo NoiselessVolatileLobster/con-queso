@@ -1,0 +1,9 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "Shun",
+    "short": "Shun and unshun members with style.",
+    "description": "A fun cog to shun members and track how long they've been shunned.",
+    "tags": ["fun", "shun"],
+    "requirements": [],
+    "end_user_data_statement": "This cog stores user IDs and timestamps to track shunning status."
+}
