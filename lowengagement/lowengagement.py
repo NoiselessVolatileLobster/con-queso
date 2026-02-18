@@ -2,6 +2,7 @@ import discord
 import re
 import datetime
 import logging
+import inspect
 from typing import Optional, Union, List
 
 from redbot.core import commands, Config, checks
@@ -82,8 +83,15 @@ class LowEngagement(commands.Cog):
         try:
             # Check if get_level exists and is callable
             if hasattr(levelup, "get_level"):
-                # Potential return types depending on version: int or object with .level
-                lvl = levelup.get_level(member)
+                # Potential return types depending on version: int, object with .level, or coroutine
+                response = levelup.get_level(member)
+                
+                # Check if it's awaitable (coroutine) and await it if so
+                if inspect.isawaitable(response):
+                    lvl = await response
+                else:
+                    lvl = response
+
                 if isinstance(lvl, int):
                     return lvl
                 # Handle object return if needed (hypothetical, based on common patterns)
