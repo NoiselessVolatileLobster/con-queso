@@ -1,0 +1,11 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "PermissionsCheck",
+    "description": "Check a user's permissions in a specific channel.",
+    "short": "Channel permission checker",
+    "end_user_data_statement": "This cog does not persistently store data or metadata about users.",
+    "install_msg": "Thank you for installing PermissionsCheck. Load it and run `[p]help PermissionsCheck` to get started!",
+    "min_bot_version": "3.5.0",
+    "requirements": ["tabulate"],
+    "tags": ["permissions", "utility", "admin"]
+}
