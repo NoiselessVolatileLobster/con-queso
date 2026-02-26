@@ -170,6 +170,27 @@ class CraftyAllowlist(commands.Cog):
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
+    @commands.command(name="mcuninvite", aliases=["unallow"])
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def mcuninvite_member(self, ctx: commands.Context, member: discord.Member):
+        """Remove a Discord user from the Bedrock allowlist using their linked Gamertag."""
+        gamertag = await self.config.user(member).bedrock_gamertag()
+        
+        if not gamertag:
+            return await ctx.send(f"⚠️ {member.display_name} does not have a linked Bedrock Gamertag.")
+            
+        settings = await self.config.guild(ctx.guild).all()
+        if not all([settings["url"], settings["token"], settings["server_id"]]):
+            return await ctx.send("⚠️ The Crafty integration is not fully configured. Please check `[p]craftyallowlistset view`.")
+
+        success = await self.send_crafty_command(ctx.guild, f"allowlist remove \"{gamertag}\"")
+        
+        if success:
+            await ctx.send(f"✅ Successfully removed `{gamertag}` ({member.display_name}) from the Bedrock allowlist.")
+        else:
+            await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
+
     @commands.command(name="mcinvite")
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
