@@ -1,6 +1,7 @@
 import discord
 import aiohttp
 import logging
+import typing
 from tabulate import tabulate
 from redbot.core import Config, commands, checks
 from redbot.core.bot import Red
@@ -28,7 +29,6 @@ class AllowlistModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         username = self.username_input.value.strip()
         
-        # Bedrock's native console command is always 'allowlist'
         command = f"allowlist {self.action} \"{username}\""
         success = await self.cog.send_crafty_command(self.guild, command)
         
@@ -65,15 +65,25 @@ class CraftyAllowlist(commands.Cog):
         default_guild = {
             "url": None,
             "token": None,
-            "server_id": None
+            "server_id": None,
+            "req_role": None,
+            "req_days": 0,
+            "req_level": 0,
+            "notify_channel": None
         }
         
         default_user = {
             "bedrock_gamertag": None
         }
+
+        default_member = {
+            "notified_eligible": False,
+            "added_to_allowlist": False
+        }
         
         self.config.register_guild(**default_guild)
         self.config.register_user(**default_user)
+        self.config.register_member(**default_member)
 
     async def send_crafty_command(self, guild: discord.Guild, command: str) -> bool:
         """Helper to send stdin commands to Crafty API."""
@@ -83,7 +93,6 @@ class CraftyAllowlist(commands.Cog):
         server_id = settings.get("server_id")
 
         if not all([url, token, server_id]):
-            log.warning(f"Crafty API settings incomplete for guild {guild.id}")
             return False
 
         headers = {"Authorization": f"Bearer {token}"}
@@ -102,6 +111,67 @@ class CraftyAllowlist(commands.Cog):
             log.exception(f"Exception connecting to Crafty API: {e}")
             return False
 
+    async def check_eligibility_and_allow(self, member: discord.Member, current_level: typing.Optional[int] = None):
+        """Checks if a member meets all requirements and processes them."""
+        settings = await self.config.guild(member.guild).all()
+        req_role_id = settings.get("req_role")
+        req_days = settings.get("req_days")
+        req_level = settings.get("req_level")
+        notify_channel_id = settings.get("notify_channel")
+        
+        # If any requirement is not configured, skip auto-processing
+        if not all([req_role_id, req_level]):
+            return
+            
+        role = member.guild.get_role(req_role_id)
+        if not role or role not in member.roles:
+            return
+            
+        if member.joined_at is None or (discord.utils.utcnow() - member.joined_at).days < req_days:
+            return
+            
+        if current_level is None:
+            levelup_cog = self.bot.get_cog("LevelUp")
+            if levelup_cog:
+                current_level = levelup_cog.get_level(member)  # 
+            else:
+                return
+                
+        if current_level < req_level:
+            return
+
+        # They meet all requirements. Check gamertag.
+        gamertag = await self.config.user(member).bedrock_gamertag()
+        
+        if gamertag:
+            if not await self.config.member(member).added_to_allowlist():
+                success = await self.send_crafty_command(member.guild, f"allowlist add \"{gamertag}\"")
+                if success:
+                    await self.config.member(member).added_to_allowlist.set(True)
+        else:
+            if notify_channel_id and not await self.config.member(member).notified_eligible():
+                channel = member.guild.get_channel(notify_channel_id)
+                if channel:
+                    prefix = (await self.bot.get_valid_prefixes(member.guild))[0]
+                    await channel.send(
+                        f"🎉 Hey {member.mention}, you've reached the required level and time in the server to join our Minecraft Bedrock server!\n"
+                        f"To get access, please link your gamertag using the command: `{prefix}bedrock link YourGamertagHere`"
+                    )
+                    await self.config.member(member).notified_eligible.set(True)
+
+    # --- EVENT LISTENERS ---
+
+    @commands.Cog.listener()
+    async def on_member_levelup(self, guild: discord.Guild, member: discord.Member, message: typing.Optional[str], channel: discord.abc.Messageable, new_level: int, *args, **kwargs):
+        """Listens to the vrt-cog LevelUp event."""
+        await self.check_eligibility_and_allow(member, current_level=new_level)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        """Catches when a member is manually given the required role."""
+        if before.roles != after.roles:
+            await self.check_eligibility_and_allow(after)
+
     # --- ADMIN SETTINGS & COMMANDS ---
 
     @commands.group(name="craftyallowlistset", aliases=["cas"])
@@ -114,6 +184,8 @@ class CraftyAllowlist(commands.Cog):
     @craftyallowlistset.command(name="url")
     async def set_url(self, ctx: commands.Context, url: str):
         """Set the base URL of your Crafty Controller (e.g. https://crafty.mydomain.com:8443)."""
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
         await self.config.guild(ctx.guild).url.set(url)
         await ctx.send(f"✅ Crafty Controller URL set to: `{url}`")
 
@@ -131,6 +203,34 @@ class CraftyAllowlist(commands.Cog):
         await self.config.guild(ctx.guild).server_id.set(server_id)
         await ctx.send(f"✅ Crafty Controller Server ID set to: `{server_id}`")
 
+    @craftyallowlistset.command(name="role")
+    async def set_role(self, ctx: commands.Context, role: discord.Role):
+        """Set the Discord role required for auto-allowlisting."""
+        await self.config.guild(ctx.guild).req_role.set(role.id)
+        await ctx.send(f"✅ Required role set to: `{role.name}`")
+
+    @craftyallowlistset.command(name="days")
+    async def set_days(self, ctx: commands.Context, days: int):
+        """Set the number of days a user must be in the server for auto-allowlisting."""
+        if days < 0:
+            return await ctx.send("❌ Days cannot be negative.")
+        await self.config.guild(ctx.guild).req_days.set(days)
+        await ctx.send(f"✅ Required days in server set to: `{days}`")
+
+    @craftyallowlistset.command(name="level")
+    async def set_level(self, ctx: commands.Context, level: int):
+        """Set the LevelUp level required for auto-allowlisting."""
+        if level < 0:
+            return await ctx.send("❌ Level cannot be negative.")
+        await self.config.guild(ctx.guild).req_level.set(level)
+        await ctx.send(f"✅ Required LevelUp level set to: `{level}`")
+
+    @craftyallowlistset.command(name="channel")
+    async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+        """Set the channel where eligibility notifications are sent."""
+        await self.config.guild(ctx.guild).notify_channel.set(channel.id)
+        await ctx.send(f"✅ Notification channel set to: {channel.mention}")
+
     @craftyallowlistset.command(name="view")
     async def view_settings(self, ctx: commands.Context):
         """View the current CraftyAllowlist configurations."""
@@ -139,11 +239,24 @@ class CraftyAllowlist(commands.Cog):
         url_display = settings["url"] if settings["url"] else "Not Set"
         token_display = "******** (Set)" if settings["token"] else "Not Set"
         server_id_display = settings["server_id"] if settings["server_id"] else "Not Set"
+        
+        role_obj = ctx.guild.get_role(settings["req_role"]) if settings["req_role"] else None
+        req_role_display = role_obj.name if role_obj else "Not Set"
+        
+        req_days_display = str(settings["req_days"])
+        req_level_display = str(settings["req_level"])
+        
+        channel_obj = ctx.guild.get_channel(settings["notify_channel"]) if settings["notify_channel"] else None
+        notify_channel_display = f"#{channel_obj.name}" if channel_obj else "Not Set"
 
         table_data = [
             ["API URL", url_display],
             ["API Token", token_display],
-            ["Server ID", server_id_display]
+            ["Server ID", server_id_display],
+            ["Required Role", req_role_display],
+            ["Required Days", req_days_display],
+            ["Required Level", req_level_display],
+            ["Notify Channel", notify_channel_display]
         ]
 
         table_str = tabulate(table_data, headers=["Configuration", "Value"], tablefmt="fancy_grid")
@@ -166,6 +279,7 @@ class CraftyAllowlist(commands.Cog):
         success = await self.send_crafty_command(ctx.guild, f"allowlist add \"{gamertag}\"")
         
         if success:
+            await self.config.member(member).added_to_allowlist.set(True)
             await ctx.send(f"✅ Successfully added `{gamertag}` ({member.display_name}) to the Bedrock allowlist!")
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
@@ -187,6 +301,7 @@ class CraftyAllowlist(commands.Cog):
         success = await self.send_crafty_command(ctx.guild, f"allowlist remove \"{gamertag}\"")
         
         if success:
+            await self.config.member(member).added_to_allowlist.set(False)
             await ctx.send(f"✅ Successfully removed `{gamertag}` ({member.display_name}) from the Bedrock allowlist.")
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
@@ -242,3 +357,6 @@ class CraftyAllowlist(commands.Cog):
         
         await self.config.user(ctx.author).bedrock_gamertag.set(gamertag)
         await ctx.send(f"✅ Your Bedrock Gamertag has been set to: `{gamertag}`\n*(Administrators can now add you to the server using your Discord mention!)*")
+        
+        # Check if they are eligible for auto-allowlist now that they linked it
+        await self.check_eligibility_and_allow(ctx.author)
