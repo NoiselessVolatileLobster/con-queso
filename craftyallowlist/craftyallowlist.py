@@ -28,6 +28,7 @@ class AllowlistModal(discord.ui.Modal):
         await interaction.response.defer(ephemeral=True)
         username = self.username_input.value.strip()
         
+        # Bedrock's native console command is always 'allowlist'
         command = f"allowlist {self.action} \"{username}\""
         success = await self.cog.send_crafty_command(self.guild, command)
         
@@ -169,10 +170,10 @@ class CraftyAllowlist(commands.Cog):
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
-    @commands.command(name="allowlist")
+    @commands.command(name="mcinvite")
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
-    async def allowlist_manage(self, ctx: commands.Context):
+    async def mcinvite_manage(self, ctx: commands.Context):
         """Open the interactive form to manually manage the Bedrock allowlist."""
         settings = await self.config.guild(ctx.guild).all()
         if not all([settings["url"], settings["token"], settings["server_id"]]):
@@ -216,7 +217,6 @@ class CraftyAllowlist(commands.Cog):
     @bedrock.command(name="link")
     async def bedrock_link(self, ctx: commands.Context, *, gamertag: str):
         """Link your Minecraft Bedrock Gamertag to your Discord account."""
-        # Sanitize input slightly
         gamertag = gamertag.strip()
         
         await self.config.user(ctx.author).bedrock_gamertag.set(gamertag)
