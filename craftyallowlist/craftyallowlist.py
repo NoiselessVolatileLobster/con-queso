@@ -95,13 +95,17 @@ class CraftyAllowlist(commands.Cog):
         if not all([url, token, server_id]):
             return False
 
-        headers = {"Authorization": f"Bearer {token}"}
-        payload = {"data": command}
+        # Explicitly set content type to plain text so Crafty reads the raw string
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "text/plain" 
+        }
         endpoint = f"{url.rstrip('/')}/api/v2/servers/{server_id}/stdin"
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.post(endpoint, headers=headers, json=payload, timeout=10) as response:
+                # Send the raw command string using 'data' instead of 'json'
+                async with session.post(endpoint, headers=headers, data=command, timeout=10) as response:
                     if response.status in (200, 204):
                         return True
                     else:
@@ -119,7 +123,6 @@ class CraftyAllowlist(commands.Cog):
         req_level = settings.get("req_level")
         notify_channel_id = settings.get("notify_channel")
         
-        # If any requirement is not configured, skip auto-processing
         if not all([req_role_id, req_level]):
             return
             
@@ -133,14 +136,13 @@ class CraftyAllowlist(commands.Cog):
         if current_level is None:
             levelup_cog = self.bot.get_cog("LevelUp")
             if levelup_cog:
-                current_level = levelup_cog.get_level(member)  # 
+                current_level = levelup_cog.get_level(member)  
             else:
                 return
                 
         if current_level < req_level:
             return
 
-        # They meet all requirements. Check gamertag.
         gamertag = await self.config.user(member).bedrock_gamertag()
         
         if gamertag:
