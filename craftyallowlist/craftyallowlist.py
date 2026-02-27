@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 import aiohttp
 import logging
 import typing
@@ -33,7 +34,8 @@ class AllowlistModal(discord.ui.Modal):
         success = await self.cog.send_crafty_command(self.guild, command)
         
         if success:
-            await interaction.followup.send(f"✅ Successfully sent command to {self.action} `{username}`.", ephemeral=True)
+            # Gamertag hidden for privacy
+            await interaction.followup.send(f"✅ Successfully sent command to {self.action} the specified user.", ephemeral=True)
         else:
             await interaction.followup.send(f"❌ Failed to communicate with Crafty Controller. Check your `[p]craftyallowlistset view` settings.", ephemeral=True)
 
@@ -152,10 +154,9 @@ class CraftyAllowlist(commands.Cog):
             if notify_channel_id and not await self.config.member(member).notified_eligible():
                 channel = member.guild.get_channel(notify_channel_id)
                 if channel:
-                    prefix = (await self.bot.get_valid_prefixes(member.guild))[0]
                     await channel.send(
                         f"🎉 Hey {member.mention}, you've reached the required level and time in the server to join our Minecraft Bedrock server!\n"
-                        f"To get access, please link your gamertag using the command: `{prefix}bedrock link YourGamertagHere`"
+                        f"To get access, please link your gamertag using the slash command: `/mclink`"
                     )
                     await self.config.member(member).notified_eligible.set(True)
 
@@ -271,26 +272,24 @@ class CraftyAllowlist(commands.Cog):
         if not all([settings["url"], settings["token"], settings["server_id"]]):
             return await ctx.send("⚠️ The Crafty integration is not fully configured. Please use `[p]craftyallowlistset` first.")
 
-        # If no member is mentioned, open the interactive form
         if member is None:
             view = AllowlistManageView(cog=self, guild=ctx.guild)
             return await ctx.send("Use the buttons below to open the manual allowlist management form:", view=view)
 
-        # If a member is mentioned, process them directly
         gamertag = await self.config.user(member).bedrock_gamertag()
         
         if not gamertag:
-            prefix = ctx.clean_prefix
             return await ctx.send(
                 f"⚠️ {member.display_name} has not linked a Bedrock Gamertag yet.\n"
-                f"Hey {member.mention}, please link your Minecraft Gamertag by typing: `{prefix}bedrock link YourGamertagHere`"
+                f"Hey {member.mention}, please link your Minecraft Gamertag by using the `/mclink` slash command!"
             )
 
         success = await self.send_crafty_command(ctx.guild, f"allowlist add \"{gamertag}\"")
         
         if success:
             await self.config.member(member).added_to_allowlist.set(True)
-            await ctx.send(f"✅ Successfully added `{gamertag}` ({member.display_name}) to the Bedrock allowlist!")
+            # Gamertag hidden for privacy
+            await ctx.send(f"✅ Successfully added **{member.display_name}** to the Bedrock allowlist!")
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
@@ -298,7 +297,7 @@ class CraftyAllowlist(commands.Cog):
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
     async def mcuninvite_member(self, ctx: commands.Context, member: discord.Member):
-        """Remove a Discord user from the Bedrock allowlist using their linked Gamertag."""
+        """Remove a Discord user from the Bedrock allowlist."""
         gamertag = await self.config.user(member).bedrock_gamertag()
         
         if not gamertag:
@@ -312,20 +311,16 @@ class CraftyAllowlist(commands.Cog):
         
         if success:
             await self.config.member(member).added_to_allowlist.set(False)
-            await ctx.send(f"✅ Successfully removed `{gamertag}` ({member.display_name}) from the Bedrock allowlist.")
+            # Gamertag hidden for privacy
+            await ctx.send(f"✅ Successfully removed **{member.display_name}** from the Bedrock allowlist.")
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
-    # --- USER FACING COMMANDS ---
+    # --- USER FACING SLASH COMMANDS ---
 
-    @commands.group(name="bedrock", invoke_without_command=True)
-    async def bedrock(self, ctx: commands.Context):
-        """Manage your linked Minecraft Bedrock account."""
-        await ctx.send_help(ctx.command)
-
-    @bedrock.command(name="howto")
-    async def bedrock_howto(self, ctx: commands.Context):
-        """Learn how to find your Bedrock Gamertag."""
+    @app_commands.command(name="mchowto", description="Learn how to find your Minecraft Bedrock Gamertag.")
+    async def mchowto(self, interaction: discord.Interaction):
+        """Provides instructions on finding a Bedrock Gamertag via slash command."""
         embed = discord.Embed(
             title="How to find your Minecraft Bedrock Gamertag",
             description="Minecraft Bedrock Edition uses your Xbox Live Gamertag for server allowlists.",
@@ -343,18 +338,20 @@ class CraftyAllowlist(commands.Cog):
         )
         embed.add_field(
             name="Linking your Account",
-            value=f"Once you know your Gamertag, link it to the bot by typing:\n`{ctx.prefix}bedrock link YourGamertagHere`",
+            value="Once you know your Gamertag, link it securely by typing:\n`/mclink gamertag:YourGamertagHere`",
             inline=False
         )
-        await ctx.send(embed=embed)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @bedrock.command(name="link")
-    async def bedrock_link(self, ctx: commands.Context, *, gamertag: str):
-        """Link your Minecraft Bedrock Gamertag to your Discord account."""
+    @app_commands.command(name="mclink", description="Securely link your Minecraft Bedrock Gamertag to your Discord account.")
+    @app_commands.describe(gamertag="Your exact Xbox Live Gamertag")
+    async def mclink(self, interaction: discord.Interaction, gamertag: str):
+        """Links the user's gamertag securely via an ephemeral slash command."""
         gamertag = gamertag.strip()
+        await self.config.user(interaction.user).bedrock_gamertag.set(gamertag)
         
-        await self.config.user(ctx.author).bedrock_gamertag.set(gamertag)
-        await ctx.send(f"✅ Your Bedrock Gamertag has been set to: `{gamertag}`\n*(Administrators can now add you to the server using your Discord mention!)*")
+        # Gamertag hidden from the confirmation message too, though ephemeral adds a layer of security
+        await interaction.response.send_message("✅ Your Bedrock Gamertag has been securely linked to your account!", ephemeral=True)
         
-        # Check if they are eligible for auto-allowlist now that they linked it
-        await self.check_eligibility_and_allow(ctx.author)
+        if isinstance(interaction.user, discord.Member):
+            await self.check_eligibility_and_allow(interaction.user)
