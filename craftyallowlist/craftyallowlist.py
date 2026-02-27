@@ -95,7 +95,6 @@ class CraftyAllowlist(commands.Cog):
         if not all([url, token, server_id]):
             return False
 
-        # Explicitly set content type to plain text so Crafty reads the raw string
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "text/plain" 
@@ -104,7 +103,6 @@ class CraftyAllowlist(commands.Cog):
 
         try:
             async with aiohttp.ClientSession() as session:
-                # Send the raw command string using 'data' instead of 'json'
                 async with session.post(endpoint, headers=headers, data=command, timeout=10) as response:
                     if response.status in (200, 204):
                         return True
@@ -264,19 +262,29 @@ class CraftyAllowlist(commands.Cog):
         table_str = tabulate(table_data, headers=["Configuration", "Value"], tablefmt="fancy_grid")
         await ctx.send(f"### CraftyAllowlist Settings\n```\n{table_str}\n```")
 
-    @commands.command(name="allow")
+    @commands.command(name="mcinvite")
     @commands.guild_only()
     @checks.admin_or_permissions(manage_guild=True)
-    async def allow_member(self, ctx: commands.Context, member: discord.Member):
-        """Add a Discord user to the Bedrock allowlist using their linked Gamertag."""
+    async def mcinvite_manage(self, ctx: commands.Context, member: typing.Optional[discord.Member] = None):
+        """Add a user to the Bedrock allowlist directly, or open the form if no user is specified."""
+        settings = await self.config.guild(ctx.guild).all()
+        if not all([settings["url"], settings["token"], settings["server_id"]]):
+            return await ctx.send("⚠️ The Crafty integration is not fully configured. Please use `[p]craftyallowlistset` first.")
+
+        # If no member is mentioned, open the interactive form
+        if member is None:
+            view = AllowlistManageView(cog=self, guild=ctx.guild)
+            return await ctx.send("Use the buttons below to open the manual allowlist management form:", view=view)
+
+        # If a member is mentioned, process them directly
         gamertag = await self.config.user(member).bedrock_gamertag()
         
         if not gamertag:
-            return await ctx.send(f"⚠️ {member.display_name} has not linked a Bedrock Gamertag yet. Tell them to use `[p]bedrock link <gamertag>` first.")
-            
-        settings = await self.config.guild(ctx.guild).all()
-        if not all([settings["url"], settings["token"], settings["server_id"]]):
-            return await ctx.send("⚠️ The Crafty integration is not fully configured. Please check `[p]craftyallowlistset view`.")
+            prefix = ctx.clean_prefix
+            return await ctx.send(
+                f"⚠️ {member.display_name} has not linked a Bedrock Gamertag yet.\n"
+                f"Hey {member.mention}, please link your Minecraft Gamertag by typing: `{prefix}bedrock link YourGamertagHere`"
+            )
 
         success = await self.send_crafty_command(ctx.guild, f"allowlist add \"{gamertag}\"")
         
@@ -307,18 +315,6 @@ class CraftyAllowlist(commands.Cog):
             await ctx.send(f"✅ Successfully removed `{gamertag}` ({member.display_name}) from the Bedrock allowlist.")
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
-
-    @commands.command(name="mcinvite")
-    @commands.guild_only()
-    @checks.admin_or_permissions(manage_guild=True)
-    async def mcinvite_manage(self, ctx: commands.Context):
-        """Open the interactive form to manually manage the Bedrock allowlist."""
-        settings = await self.config.guild(ctx.guild).all()
-        if not all([settings["url"], settings["token"], settings["server_id"]]):
-            return await ctx.send("⚠️ The Crafty integration is not fully configured. Please use `[p]craftyallowlistset` first.")
-
-        view = AllowlistManageView(cog=self, guild=ctx.guild)
-        await ctx.send("Use the buttons below to open the manual allowlist management form:", view=view)
 
     # --- USER FACING COMMANDS ---
 
