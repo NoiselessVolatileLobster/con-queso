@@ -2,13 +2,12 @@ import discord
 import logging
 import re
 import asyncio
-import time
-from datetime import datetime, timedelta
-from typing import Literal, Optional, Union, Dict, List, Any
+from datetime import datetime
+from typing import Literal, Optional
 
 from redbot.core import commands, Config, checks
 from redbot.core.bot import Red
-from redbot.core.utils.chat_formatting import box, pagify, humanize_list, bold
+from redbot.core.utils.chat_formatting import box, pagify, humanize_list
 
 log = logging.getLogger("red.activitytracker")
 
@@ -39,6 +38,7 @@ class RunPolicingView(discord.ui.View):
         
         await interaction.followup.send("Initiating manual policing run...", ephemeral=True)
         await self.cog.run_policing(manual_report_ctx=self.ctx)
+
 
 class ActivityTracker(commands.Cog):
     """
@@ -125,7 +125,6 @@ class ActivityTracker(commands.Cog):
         if cog and hasattr(cog, "api"):
             try:
                 # Based on WarnSystem API: warn(guild, members, author, level, reason...)
-                # members is Iterable
                 await cog.api.warn(
                     guild=guild,
                     members=[member],
@@ -322,18 +321,8 @@ class ActivityTracker(commands.Cog):
                     duration_mins = (now - start_ts) / 60
                     conf = await self.config.guild(member.guild).all()
                     
-                    # Logic: Check user count in the channel they LEFT
-                    # This implies they were part of a valid conversation
-                    user_count = len(before.channel.members) 
-                    # Note: They are already gone from 'before.channel.members' in most cache impls, 
-                    # but 'before' snapshot might count them? 
-                    # Safest is to just check config thresholds against duration.
-                    
                     if duration_mins >= conf["voice_min_minutes"]:
-                        # We only count if the channel had enough people. 
-                        # Since user just left, we check current count + 1 roughly, or just ignore exact user count for simplicity
                         # strictly adhering to user request "voice_min_users"
-                        # We'll check the current count of the channel they left.
                         if len(before.channel.members) >= (conf["voice_min_users"] - 1): 
                             await self.config.member(member).last_active.set(now)
                     
@@ -414,9 +403,10 @@ class ActivityTracker(commands.Cog):
             f"{humanize_list(channels) if channels else 'None'}\n"
         )
         
-        await ctx.send(box(settings_info, lang="ini"))
+        await ctx.send("**ActivityTracker Settings**\n" + box(settings_info, lang="ini"))
         if conf["policing_rules"]:
-            await ctx.send(box(rules_str, lang="css", title="Policing Rules"))
+            # FIX: Removed title kwarg, as it throws TypeError in box(). Instead, prepend text.
+            await ctx.send("**Policing Rules**\n" + box(rules_str, lang="css"))
 
     @activitytrackerset.command(name="listusers")
     async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating"] = None):
@@ -432,10 +422,8 @@ class ActivityTracker(commands.Cog):
 
         conf = await self.config.guild(ctx.guild).all()
         inactivity_days = conf["inactivity_days"]
-        # optimization: fetch all member data at once
         all_member_data = await self.config.all_members(ctx.guild)
         
-        # Determine title based on filter
         filter_str = status_filter.title() if status_filter else "All"
         lines = [f"--- {filter_str} Users ---"]
         lines.append(f"{'User':<20} {'ID':<20} {'Last Active':<12} {'Status'}")
@@ -450,7 +438,6 @@ class ActivityTracker(commands.Cog):
             if is_hibernating:
                 status = "Hibernating"
 
-            # Check Activity
             mem_data = all_member_data.get(member.id, {})
             last_active = mem_data.get("last_active")
             
@@ -458,18 +445,14 @@ class ActivityTracker(commands.Cog):
             if last_active:
                 last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
                 
-                # If they are hibernating, status is already "Hibernating"
                 if not is_hibernating:
                     days_diff = (datetime.utcnow().timestamp() - last_active) / 86400
                     if days_diff < inactivity_days:
                         status = "Active"
             
-            # Filter logic
-            if status_filter:
-                if status.lower() != status_filter.lower():
-                    continue
+            if status_filter and status.lower() != status_filter.lower():
+                continue
 
-            # Format line
             name = member.name
             if len(name) > 19:
                 name = name[:18] + "…"
@@ -532,7 +515,6 @@ class ActivityTracker(commands.Cog):
         else:
             msg_text += "\n**WARNING:** The bot will now actively policing users (Kick/Warn) based on your rules."
 
-        # Prompt to run immediately
         view = RunPolicingView(self, ctx)
         view.message = await ctx.send(msg_text, view=view)
 
@@ -552,11 +534,9 @@ class ActivityTracker(commands.Cog):
         """
         Add a policing rule.
         
-        Example: `[p]atset rule add 5 45 warn`
-        (Users level 5+ inactive for 45+ days will be warned)
+        Example: `[p]activitytrackerset rule add 5 45 warn`
         """
         async with self.config.guild(ctx.guild).policing_rules() as r:
-            # Check for duplicates
             for rule in r:
                 if rule['level'] == level and rule['days'] == days:
                     await ctx.send("A rule with this level and day threshold already exists.")
