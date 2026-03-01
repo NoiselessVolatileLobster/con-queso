@@ -411,6 +411,26 @@ class CraftyAllowlist(commands.Cog):
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
+    @commands.command(name="mcrecheck")
+    @commands.guild_only()
+    @checks.admin_or_permissions(manage_guild=True)
+    async def mcrecheck(self, ctx: commands.Context, member: typing.Optional[discord.Member] = None):
+        """Force a recheck of allowlist requirements for a specific member or all members."""
+        settings = await self.config.guild(ctx.guild).all()
+        if not all([settings["url"], settings["token"], settings["server_id"]]):
+            return await ctx.send("⚠️ The Crafty integration is not fully configured. Please use `[p]craftyallowlistset` first.")
+
+        if member:
+            await self.check_eligibility_and_allow(member)
+            await ctx.send(f"✅ Re-evaluation complete for **{member.display_name}**.")
+        else:
+            msg = await ctx.send("🔄 Re-evaluating all server members. This may take a moment...")
+            async with ctx.typing():
+                for m in ctx.guild.members:
+                    if not m.bot:
+                        await self.check_eligibility_and_allow(m)
+            await msg.edit(content="✅ Finished re-evaluating all members.")
+
     # --- USER FACING SLASH COMMANDS ---
 
     @app_commands.command(name="mchowto", description="Learn how to find your Minecraft Bedrock Gamertag.")
