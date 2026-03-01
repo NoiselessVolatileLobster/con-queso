@@ -129,7 +129,7 @@ class ActivityTracker(commands.Cog):
         cog = self.bot.get_cog("WarnSystem")
         if cog and hasattr(cog, "api"):
             try:
-                await cog.api.warn(
+                fails = await cog.api.warn(
                     guild=guild,
                     members=[member],
                     author=guild.me,
@@ -137,6 +137,12 @@ class ActivityTracker(commands.Cog):
                     reason=reason,
                     take_action=True
                 )
+                
+                # WarnSystem API returns a list of failures. If it's empty, the warn succeeded.
+                if isinstance(fails, list) and len(fails) > 0:
+                    log.warning(f"WarnSystem failed to warn {member}: {fails[0]}")
+                    return False
+                    
                 return True
             except Exception as e:
                 log.error(f"WarnSystem integration failed: {e}")
@@ -203,9 +209,7 @@ class ActivityTracker(commands.Cog):
                     action_str = f"Action: {applicable_rule['action'].upper()} (Rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days)"
                     entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str}"
                     
-                    if manual_report_ctx:
-                        report_entries.append(entry)
-                    elif conf["preview_mode"]:
+                    if conf["preview_mode"]:
                         report_entries.append(entry)
                     else:
                         await self._execute_policing_action(member, applicable_rule, int(days_inactive))
