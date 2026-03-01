@@ -2,7 +2,7 @@
     "author": ["NoiselessVolatileLobster"],
     "name": "CraftyAllowlist",
     "short": "Manage Minecraft Bedrock allowlist via Crafty Controller",
-    "description": "Allows Discord admins to add or remove users from a Bedrock allowlist using Crafty Controller's API with Discord UI Modals.",
+    "description": "Allows Discord admins to add or remove users from a Bedrock allowlist using Crafty Controller's API with Discord UI Modals. Includes configurable success embeds.",
     "end_user_data_statement": "This cog does not persistently store end-user data.",
     "install_msg": "Thanks for installing CraftyAllowlist! Configure it using `[p]craftyallowlistset`.",
     "min_bot_version": "3.5.22",

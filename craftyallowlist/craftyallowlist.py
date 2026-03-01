@@ -71,7 +71,11 @@ class CraftyAllowlist(commands.Cog):
             "req_role": None,
             "req_days": 0,
             "req_level": 0,
-            "notify_channel": None
+            "notify_channel": None,
+            "success_channel": None,
+            "embed_title": "🎉 Allowlist Updated!",
+            "embed_desc": "{member.mention} (`{gamertag}`) has been successfully added to the allowlist.",
+            "embed_footer": "Welcome to the server!"
         }
         
         default_user = {
@@ -115,6 +119,45 @@ class CraftyAllowlist(commands.Cog):
             log.exception(f"Exception connecting to Crafty API: {e}")
             return False
 
+    async def send_success_embed(self, member: discord.Member, gamertag: str):
+        """Builds and sends the configurable success embed."""
+        settings = await self.config.guild(member.guild).all()
+        channel_id = settings.get("success_channel")
+        if not channel_id:
+            return
+            
+        channel = member.guild.get_channel(channel_id)
+        if not channel:
+            return
+
+        def format_text(text: str) -> str:
+            if not text:
+                return ""
+            return text.replace("{member.mention}", member.mention)\
+                       .replace("{member.display_name}", member.display_name)\
+                       .replace("{member.name}", member.name)\
+                       .replace("{gamertag}", gamertag)
+
+        title = format_text(settings.get("embed_title", ""))
+        desc = format_text(settings.get("embed_desc", ""))
+        footer = format_text(settings.get("embed_footer", ""))
+        
+        if not title and not desc:
+            return # Discord requires at least a title or description for an embed
+
+        embed = discord.Embed(color=discord.Color.green())
+        if title:
+            embed.title = title
+        if desc:
+            embed.description = desc
+        if footer:
+            embed.set_footer(text=footer)
+
+        try:
+            await channel.send(embed=embed)
+        except discord.Forbidden:
+            log.warning(f"Missing permissions to send success embed in channel {channel.name} (ID: {channel.id}).")
+
     async def check_eligibility_and_allow(self, member: discord.Member, current_level: typing.Optional[int] = None):
         """Checks if a member meets all requirements and processes them."""
         settings = await self.config.guild(member.guild).all()
@@ -150,6 +193,7 @@ class CraftyAllowlist(commands.Cog):
                 success = await self.send_crafty_command(member.guild, f"allowlist add \"{gamertag}\"")
                 if success:
                     await self.config.member(member).added_to_allowlist.set(True)
+                    await self.send_success_embed(member, gamertag)
         else:
             if notify_channel_id and not await self.config.member(member).notified_eligible():
                 channel = member.guild.get_channel(notify_channel_id)
@@ -226,11 +270,51 @@ class CraftyAllowlist(commands.Cog):
         await self.config.guild(ctx.guild).req_level.set(level)
         await ctx.send(f"✅ Required LevelUp level set to: `{level}`")
 
-    @craftyallowlistset.command(name="channel")
-    async def set_channel(self, ctx: commands.Context, channel: discord.TextChannel):
+    @craftyallowlistset.command(name="notifychannel")
+    async def set_notifychannel(self, ctx: commands.Context, channel: discord.TextChannel):
         """Set the channel where eligibility notifications are sent."""
         await self.config.guild(ctx.guild).notify_channel.set(channel.id)
         await ctx.send(f"✅ Notification channel set to: {channel.mention}")
+
+    @craftyallowlistset.command(name="successchannel")
+    async def set_successchannel(self, ctx: commands.Context, channel: typing.Optional[discord.TextChannel] = None):
+        """Set the channel where success embeds are posted. Leave blank to disable."""
+        if channel:
+            await self.config.guild(ctx.guild).success_channel.set(channel.id)
+            await ctx.send(f"✅ Success embed channel set to: {channel.mention}")
+        else:
+            await self.config.guild(ctx.guild).success_channel.set(None)
+            await ctx.send("✅ Success embed channel disabled.")
+
+    @craftyallowlistset.command(name="embedtitle")
+    async def set_embedtitle(self, ctx: commands.Context, *, title: str = ""):
+        """Set the title of the success embed. 
+        Placeholders: `{member.mention}`, `{member.display_name}`, `{member.name}`, `{gamertag}`"""
+        await self.config.guild(ctx.guild).embed_title.set(title)
+        if title:
+            await ctx.send(f"✅ Embed title updated.")
+        else:
+            await ctx.send("✅ Embed title cleared.")
+
+    @craftyallowlistset.command(name="embeddesc")
+    async def set_embeddesc(self, ctx: commands.Context, *, description: str = ""):
+        """Set the description of the success embed. 
+        Placeholders: `{member.mention}`, `{member.display_name}`, `{member.name}`, `{gamertag}`"""
+        await self.config.guild(ctx.guild).embed_desc.set(description)
+        if description:
+            await ctx.send(f"✅ Embed description updated.")
+        else:
+            await ctx.send("✅ Embed description cleared.")
+
+    @craftyallowlistset.command(name="embedfooter")
+    async def set_embedfooter(self, ctx: commands.Context, *, footer: str = ""):
+        """Set the footer of the success embed.
+        Placeholders: `{member.mention}`, `{member.display_name}`, `{member.name}`, `{gamertag}`"""
+        await self.config.guild(ctx.guild).embed_footer.set(footer)
+        if footer:
+            await ctx.send(f"✅ Embed footer updated.")
+        else:
+            await ctx.send("✅ Embed footer cleared.")
 
     @craftyallowlistset.command(name="view")
     async def view_settings(self, ctx: commands.Context):
@@ -247,8 +331,14 @@ class CraftyAllowlist(commands.Cog):
         req_days_display = str(settings["req_days"])
         req_level_display = str(settings["req_level"])
         
-        channel_obj = ctx.guild.get_channel(settings["notify_channel"]) if settings["notify_channel"] else None
-        notify_channel_display = f"#{channel_obj.name}" if channel_obj else "Not Set"
+        notify_channel_obj = ctx.guild.get_channel(settings["notify_channel"]) if settings["notify_channel"] else None
+        notify_channel_display = f"#{notify_channel_obj.name}" if notify_channel_obj else "Not Set"
+
+        success_channel_obj = ctx.guild.get_channel(settings["success_channel"]) if settings["success_channel"] else None
+        success_channel_display = f"#{success_channel_obj.name}" if success_channel_obj else "Not Set"
+
+        def truncate(text, length=30):
+            return (text[:length] + '...') if text and len(text) > length else (text if text else "None")
 
         table_data = [
             ["API URL", url_display],
@@ -257,7 +347,11 @@ class CraftyAllowlist(commands.Cog):
             ["Required Role", req_role_display],
             ["Required Days", req_days_display],
             ["Required Level", req_level_display],
-            ["Notify Channel", notify_channel_display]
+            ["Notify Channel", notify_channel_display],
+            ["Success Channel", success_channel_display],
+            ["Embed Title", truncate(settings["embed_title"])],
+            ["Embed Desc", truncate(settings["embed_desc"], 50)],
+            ["Embed Footer", truncate(settings["embed_footer"])]
         ]
 
         table_str = tabulate(table_data, headers=["Configuration", "Value"], tablefmt="fancy_grid")
@@ -290,6 +384,7 @@ class CraftyAllowlist(commands.Cog):
             await self.config.member(member).added_to_allowlist.set(True)
             # Gamertag hidden for privacy
             await ctx.send(f"✅ Successfully added **{member.display_name}** to the Bedrock allowlist!")
+            await self.send_success_embed(member, gamertag)
         else:
             await ctx.send("❌ Failed to communicate with Crafty Controller. Check the logs or your API settings.")
 
