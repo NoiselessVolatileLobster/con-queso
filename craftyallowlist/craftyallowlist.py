@@ -3,6 +3,7 @@ from discord import app_commands
 import aiohttp
 import logging
 import typing
+import inspect
 from tabulate import tabulate
 from redbot.core import Config, commands, checks
 from redbot.core.bot import Red
@@ -179,7 +180,11 @@ class CraftyAllowlist(commands.Cog):
         if current_level is None:
             levelup_cog = self.bot.get_cog("LevelUp")
             if levelup_cog:
-                current_level = levelup_cog.get_level(member)  
+                level_result = levelup_cog.get_level(member)
+                if inspect.isawaitable(level_result):
+                    current_level = await level_result
+                else:
+                    current_level = level_result
             else:
                 return
                 
