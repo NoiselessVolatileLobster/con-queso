@@ -147,11 +147,21 @@ class ActivityTracker(commands.Cog):
     # --------------------------------------------------------------------------------
 
     def _get_applicable_rule(self, rules: list, user_level: int, days_inactive: float) -> Optional[Dict[str, Any]]:
-        """Evaluate sorted rules and return the most severe applicable rule."""
-        sorted_rules = sorted(rules, key=lambda x: x['days'], reverse=True)
-        for rule in sorted_rules:
-            if user_level >= rule["level"] and days_inactive >= rule["days"]:
+        """
+        Evaluate rules where rule['level'] acts as a maximum level cap.
+        Applies to users whose level is <= the rule's level.
+        """
+        applicable_rules = [r for r in rules if user_level <= r["level"]]
+        if not applicable_rules:
+            return None
+            
+        # Sort by days descending. If tied, sort by level ascending (stricter level cap first).
+        applicable_rules.sort(key=lambda x: (x['days'], -x['level']), reverse=True)
+        
+        for rule in applicable_rules:
+            if days_inactive >= rule["days"]:
                 return rule
+                
         return None
 
     async def run_policing(self, manual_report_ctx=None):
@@ -190,7 +200,7 @@ class ActivityTracker(commands.Cog):
                 applicable_rule = self._get_applicable_rule(conf["policing_rules"], user_level, days_inactive)
                 
                 if applicable_rule:
-                    action_str = f"Action: {applicable_rule['action'].upper()} (Rule: Lvl {applicable_rule['level']} / {applicable_rule['days']} days)"
+                    action_str = f"Action: {applicable_rule['action'].upper()} (Rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days)"
                     entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str}"
                     
                     if manual_report_ctx:
@@ -223,7 +233,7 @@ class ActivityTracker(commands.Cog):
 
     async def _execute_policing_action(self, member: discord.Member, rule: dict, days: int):
         action = rule["action"].lower()
-        reason = f"ActivityTracker: Inactive for {days} days (Rule: >{rule['days']} days, Lvl {rule['level']})."
+        reason = f"ActivityTracker: Inactive for {days} days (Rule: >{rule['days']} days, Lvl <={rule['level']})."
         
         try:
             if action == "kick":
@@ -353,8 +363,8 @@ class ActivityTracker(commands.Cog):
         rules_data = []
         if conf["policing_rules"]:
             rules = sorted(conf["policing_rules"], key=lambda x: x['level'])
-            rules_data.append(["Lvl", "Days", "Action"])
-            rules_data.append(["---", "----", "------"])
+            rules_data.append(["Max Lvl", "Days", "Action"])
+            rules_data.append(["-------", "----", "------"])
             for r in rules:
                 rules_data.append([str(r['level']), str(r['days']), r['action'].title()])
         
@@ -535,7 +545,7 @@ class ActivityTracker(commands.Cog):
                     return
             r.append({"level": level, "days": days, "action": action})
         await ctx.tick()
-        await ctx.send(f"Rule added: Level {level}+ inactive for {days}+ days -> {action.upper()}")
+        await ctx.send(f"Rule added: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()}")
 
     @rules.command(name="remove")
     async def rule_remove(self, ctx, level: int, days: int):
