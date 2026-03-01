@@ -124,8 +124,8 @@ class ActivityTracker(commands.Cog):
                 log.debug(f"Failed to fetch hibernation status for {member}: {e}")
         return False
 
-    async def _warn_user(self, guild: discord.Guild, member: discord.Member, reason: str) -> bool:
-        """Warn user via WarnSystem cog API if available."""
+    async def _warnsystem_action(self, guild: discord.Guild, member: discord.Member, level: int, reason: str) -> bool:
+        """Execute action via WarnSystem cog API if available (Level 1=Warn, Level 3=Kick)."""
         cog = self.bot.get_cog("WarnSystem")
         if cog and hasattr(cog, "api"):
             try:
@@ -133,14 +133,14 @@ class ActivityTracker(commands.Cog):
                     guild=guild,
                     members=[member],
                     author=guild.me,
-                    level=1, 
+                    level=level, 
                     reason=reason,
                     take_action=True
                 )
                 
                 # WarnSystem API returns a list of failures. If it's empty, the warn succeeded.
                 if isinstance(fails, list) and len(fails) > 0:
-                    log.warning(f"WarnSystem failed to warn {member}: {fails[0]}")
+                    log.warning(f"WarnSystem failed to execute level {level} on {member}: {fails[0]}")
                     return False
                     
                 return True
@@ -244,10 +244,20 @@ class ActivityTracker(commands.Cog):
                 if member.top_role >= member.guild.me.top_role:
                     log.warning(f"Cannot kick {member} in {member.guild.name}: Role hierarchy prevents it.")
                     return
-                await member.kick(reason=reason)
+                
+                # Try WarnSystem first (Level 3 = Kick). Handles DMs and modlogs before removing.
+                success = await self._warnsystem_action(member.guild, member, level=3, reason=reason)
+                if not success:
+                    # Fallback to simple DM and native kick
+                    try:
+                        await member.send(f"**You have been kicked from {member.guild.name}**: {reason}")
+                    except discord.Forbidden:
+                        pass
+                    await member.kick(reason=reason)
             
             elif action == "warn":
-                success = await self._warn_user(member.guild, member, reason)
+                # Try WarnSystem first (Level 1 = Warn). Handles DMs and modlogs.
+                success = await self._warnsystem_action(member.guild, member, level=1, reason=reason)
                 if not success:
                     try:
                         await member.send(f"**Inactivity Warning** in {member.guild.name}: {reason}")
