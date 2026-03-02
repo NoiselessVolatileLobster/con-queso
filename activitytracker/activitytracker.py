@@ -582,15 +582,24 @@ class ActivityTracker(commands.Cog):
 
     @rules.command(name="add")
     async def rule_add(self, ctx, level: int, days: int, action: Literal["kick", "warn", "mention"], cooldown: int):
-        """Add a policing rule. Example: `[p]activitytrackerset rule add 5 45 warn 7`"""
+        """Add or update a policing rule. Example: `[p]activitytrackerset rule add 5 45 warn 7`"""
         async with self.config.guild(ctx.guild).policing_rules() as r:
+            updated = False
             for rule in r:
                 if rule['level'] == level and rule['days'] == days:
-                    await ctx.send("A rule with this level and day threshold already exists.")
-                    return
-            r.append({"level": level, "days": days, "action": action, "cooldown": cooldown})
+                    rule['action'] = action
+                    rule['cooldown'] = cooldown
+                    updated = True
+                    break
+            
+            if not updated:
+                r.append({"level": level, "days": days, "action": action, "cooldown": cooldown})
+                
         await ctx.tick()
-        await ctx.send(f"Rule added: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()} (Cooldown: {cooldown} days)")
+        if updated:
+            await ctx.send(f"Rule updated: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()} (Cooldown: {cooldown} days)")
+        else:
+            await ctx.send(f"Rule added: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()} (Cooldown: {cooldown} days)")
 
     @rules.command(name="remove")
     async def rule_remove(self, ctx, level: int, days: int):
