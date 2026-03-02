@@ -214,10 +214,16 @@ class ActivityTracker(commands.Cog):
                     action_type = applicable_rule['action'].lower()
                     cooldown = applicable_rule.get('cooldown', 0)
                     
+                    # LOG: User met a rule
+                    log.debug(f"[Rule Met] User {member} (ID: {member.id}, Lvl {user_level}) in {guild.name} met rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days. Action: {action_type.upper()}.")
+
                     action_str = f"Action: {action_type.upper()} (Rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days)"
                     
                     # If warn/mention and they are still on cooldown, skip executing the action
                     if action_type in ["warn", "mention"] and days_since_policed < cooldown:
+                        # LOG: User bypassed due to cooldown
+                        log.debug(f"[Cooldown Bypass] User {member} (ID: {member.id}) bypassed {action_type.upper()} due to cooldown ({int(cooldown - days_since_policed)}d remaining).")
+                        
                         entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str} [ON COOLDOWN: {int(cooldown - days_since_policed)}d left]"
                         report_entries.append(entry)
                     else:
@@ -262,6 +268,9 @@ class ActivityTracker(commands.Cog):
                     log.warning(f"Cannot kick {member} in {member.guild.name}: Role hierarchy prevents it.")
                     return
                 
+                # LOG: Executing Kick
+                log.debug(f"[Action] Executing KICK on {member} (ID: {member.id}) in {member.guild.name}.")
+                
                 # Try WarnSystem first (Level 3 = Kick). Handles DMs and modlogs before removing.
                 success = await self._warnsystem_action(member.guild, member, level=3, reason=reason)
                 if not success:
@@ -273,6 +282,9 @@ class ActivityTracker(commands.Cog):
                     await member.kick(reason=reason)
             
             elif action == "warn":
+                # LOG: Executing Warn
+                log.debug(f"[Action] Executing WARN on {member} (ID: {member.id}) in {member.guild.name}.")
+                
                 # Try WarnSystem first (Level 1 = Warn). Handles DMs and modlogs.
                 success = await self._warnsystem_action(member.guild, member, level=1, reason=reason)
                 if not success:
@@ -282,6 +294,9 @@ class ActivityTracker(commands.Cog):
                         pass
             
             elif action == "mention":
+                # LOG: Executing Mention
+                log.debug(f"[Action] Executing MENTION on {member} (ID: {member.id}) in {member.guild.name}.")
+                
                 conf = await self.config.guild(member.guild).all()
                 channel = member.guild.get_channel(conf["report_channel"])
                 if channel:
