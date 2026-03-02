@@ -64,7 +64,7 @@ class ActivityTracker(commands.Cog):
             "voice_min_users": 2,
             "inactivity_days": 30,
             "preview_mode": True,
-            "policing_rules": [], # List of dicts: {"level": int, "days": int, "action": str}
+            "policing_rules": [], # List of dicts: {"level": int, "days": int, "action": str, "cooldown": int}
             "report_channel": None,
         }
 
@@ -72,6 +72,7 @@ class ActivityTracker(commands.Cog):
             "last_active": None, # Timestamp
             "message_history": [], # List of timestamps
             "voice_start": None, # Temp storage for VC session
+            "last_policed": None, # Timestamp for warn/mention cooldowns
         }
 
         self.config.register_guild(**default_guild)
@@ -195,25 +196,41 @@ class ActivityTracker(commands.Cog):
                     continue
 
                 mem_data = await self.config.member(member).all()
-                last_active = mem_data["last_active"]
+                last_active = mem_data.get("last_active")
+                last_policed = mem_data.get("last_policed")
                 
                 if not last_active:
                     last_active = member.joined_at.timestamp()
 
-                days_inactive = (datetime.utcnow().timestamp() - last_active) / 86400
+                now = datetime.utcnow().timestamp()
+                days_inactive = (now - last_active) / 86400
+                days_since_policed = (now - last_policed) / 86400 if last_policed else float('inf')
+                
                 user_level = await self._get_level(member)
                 
                 applicable_rule = self._get_applicable_rule(conf["policing_rules"], user_level, days_inactive)
                 
                 if applicable_rule:
-                    action_str = f"Action: {applicable_rule['action'].upper()} (Rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days)"
-                    entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str}"
+                    action_type = applicable_rule['action'].lower()
+                    cooldown = applicable_rule.get('cooldown', 0)
                     
-                    if conf["preview_mode"]:
+                    action_str = f"Action: {action_type.upper()} (Rule: Lvl <={applicable_rule['level']} / {applicable_rule['days']} days)"
+                    
+                    # If warn/mention and they are still on cooldown, skip executing the action
+                    if action_type in ["warn", "mention"] and days_since_policed < cooldown:
+                        entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str} [ON COOLDOWN: {int(cooldown - days_since_policed)}d left]"
                         report_entries.append(entry)
                     else:
-                        await self._execute_policing_action(member, applicable_rule, int(days_inactive))
-                        report_entries.append(f"{entry} [EXECUTED]")
+                        entry = f"• {member.display_name} (Lvl {user_level}): Inactive {int(days_inactive)} days. {action_str}"
+                        
+                        if conf["preview_mode"]:
+                            report_entries.append(entry)
+                        else:
+                            await self._execute_policing_action(member, applicable_rule, int(days_inactive))
+                            # Update last policed timestamp only if we actually executed a warn/mention action
+                            if action_type in ["warn", "mention"]:
+                                await self.config.member(member).last_policed.set(now)
+                            report_entries.append(f"{entry} [EXECUTED]")
 
             if report_entries:
                 header = f"**ActivityTracker Report** | Guild: {guild.name}\n"
@@ -377,10 +394,11 @@ class ActivityTracker(commands.Cog):
         rules_data = []
         if conf["policing_rules"]:
             rules = sorted(conf["policing_rules"], key=lambda x: x['level'])
-            rules_data.append(["Max Lvl", "Days", "Action"])
-            rules_data.append(["-------", "----", "------"])
+            rules_data.append(["Max Lvl", "Days", "Action", "Cooldown"])
+            rules_data.append(["-------", "----", "------", "--------"])
             for r in rules:
-                rules_data.append([str(r['level']), str(r['days']), r['action'].title()])
+                cooldown_str = f"{r.get('cooldown', 0)}d" if r['action'].lower() in ["warn", "mention"] else "N/A"
+                rules_data.append([str(r['level']), str(r['days']), r['action'].title(), cooldown_str])
         
         rules_str = "No rules configured."
         if rules_data:
@@ -415,11 +433,11 @@ class ActivityTracker(commands.Cog):
             await ctx.send("**Policing Rules**\n" + box(rules_str, lang="css"))
 
     @activitytrackerset.command(name="listusers")
-    async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating"] = None):
+    async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating", "cooldown"] = None):
         """
         List users with their activity status, Level, and Actions.
         
-        Optional: Filter by 'active', 'inactive', or 'hibernating'.
+        Optional: Filter by 'active', 'inactive', 'hibernating', or 'cooldown'.
         """
         if not ctx.guild:
             return
@@ -438,6 +456,8 @@ class ActivityTracker(commands.Cog):
         lines.append(f"{'User':<18} {'ID':<20} {'Lvl':<5} {'Last Active':<12} {'Status':<12} Action")
         lines.append("-" * 79)
 
+        now = datetime.utcnow().timestamp()
+
         for member in ctx.guild.members:
             if member.bot:
                 continue
@@ -445,6 +465,7 @@ class ActivityTracker(commands.Cog):
             is_hibernating = await self._is_hibernating(member)
             mem_data = all_member_data.get(member.id, {})
             last_active = mem_data.get("last_active")
+            last_policed = mem_data.get("last_policed")
             
             if not last_active:
                 last_active = member.joined_at.timestamp()
@@ -452,7 +473,8 @@ class ActivityTracker(commands.Cog):
             else:
                 last_active_str = datetime.fromtimestamp(last_active).strftime("%Y-%m-%d")
 
-            days_inactive = (datetime.utcnow().timestamp() - last_active) / 86400
+            days_inactive = (now - last_active) / 86400
+            days_since_policed = (now - last_policed) / 86400 if last_policed else float('inf')
             user_level = await self._get_level(member)
             
             # Determine applicable rule
@@ -472,7 +494,12 @@ class ActivityTracker(commands.Cog):
                 status = "Inactive"
                 if applicable_rule:
                     action_type = applicable_rule["action"].lower()
-                    if action_type == "kick":
+                    cooldown = applicable_rule.get("cooldown", 0)
+
+                    if action_type in ["warn", "mention"] and days_since_policed < cooldown:
+                        status = "Cooldown"
+                        action_emoji = "⏳"
+                    elif action_type == "kick":
                         action_emoji = "🥾"
                     elif action_type == "warn":
                         action_emoji = "❗"
@@ -550,16 +577,16 @@ class ActivityTracker(commands.Cog):
         pass
 
     @rules.command(name="add")
-    async def rule_add(self, ctx, level: int, days: int, action: Literal["kick", "warn", "mention"]):
-        """Add a policing rule. Example: `[p]activitytrackerset rule add 5 45 warn`"""
+    async def rule_add(self, ctx, level: int, days: int, action: Literal["kick", "warn", "mention"], cooldown: int):
+        """Add a policing rule. Example: `[p]activitytrackerset rule add 5 45 warn 7`"""
         async with self.config.guild(ctx.guild).policing_rules() as r:
             for rule in r:
                 if rule['level'] == level and rule['days'] == days:
                     await ctx.send("A rule with this level and day threshold already exists.")
                     return
-            r.append({"level": level, "days": days, "action": action})
+            r.append({"level": level, "days": days, "action": action, "cooldown": cooldown})
         await ctx.tick()
-        await ctx.send(f"Rule added: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()}")
+        await ctx.send(f"Rule added: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()} (Cooldown: {cooldown} days)")
 
     @rules.command(name="remove")
     async def rule_remove(self, ctx, level: int, days: int):
