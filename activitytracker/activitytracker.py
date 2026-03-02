@@ -487,24 +487,28 @@ class ActivityTracker(commands.Cog):
             if is_hibernating:
                 status = "Hibernating"
                 action_emoji = "💤"
-            elif days_inactive < inactivity_days:
-                status = "Active"
-                action_emoji = "✅"
-            else:
-                status = "Inactive"
-                if applicable_rule:
-                    action_type = applicable_rule["action"].lower()
-                    cooldown = applicable_rule.get("cooldown", 0)
+            elif applicable_rule:
+                # Prioritize rule and cooldown evaluations over the global inactivity threshold
+                action_type = applicable_rule["action"].lower()
+                cooldown = applicable_rule.get("cooldown", 0)
 
-                    if action_type in ["warn", "mention"] and days_since_policed < cooldown:
-                        status = "Cooldown"
-                        action_emoji = "⏳"
-                    elif action_type == "kick":
+                if action_type in ["warn", "mention"] and days_since_policed < cooldown:
+                    status = "Cooldown"
+                    action_emoji = "⏳"
+                else:
+                    status = "Inactive"
+                    if action_type == "kick":
                         action_emoji = "🥾"
                     elif action_type == "warn":
                         action_emoji = "❗"
                     else:
                         action_emoji = "❗" # Mentions/Other fallback
+            elif days_inactive < inactivity_days:
+                # Fall back to global inactivity days only if no rules apply
+                status = "Active"
+                action_emoji = "✅"
+            else:
+                status = "Inactive"
 
             if status_filter and status.lower() != status_filter.lower():
                 continue
