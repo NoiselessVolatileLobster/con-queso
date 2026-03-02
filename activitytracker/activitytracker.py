@@ -1,8 +1,9 @@
 import discord
+from discord.ext import tasks
 import logging
 import re
 import asyncio
-from datetime import datetime
+from datetime import datetime, time, timezone
 from typing import Literal, Optional, Dict, Any
 
 from redbot.core import commands, Config, checks
@@ -78,20 +79,23 @@ class ActivityTracker(commands.Cog):
         self.config.register_guild(**default_guild)
         self.config.register_member(**default_member)
         
-        self.policing_task = self.bot.loop.create_task(self.initialize_loop())
+        self.policing_loop.start()
 
     def cog_unload(self):
-        if self.policing_task:
-            self.policing_task.cancel()
+        self.policing_loop.cancel()
 
-    async def initialize_loop(self):
+    @tasks.loop(time=time(hour=0, minute=0, tzinfo=timezone.utc))
+    async def policing_loop(self):
+        try:
+            log.debug("Executing scheduled daily policing run.")
+            await self.run_policing()
+        except Exception as e:
+            log.error(f"Error in scheduled policing loop: {e}", exc_info=True)
+
+    @policing_loop.before_loop
+    async def before_policing_loop(self):
         await self.bot.wait_until_ready()
-        while True:
-            try:
-                await self.run_policing()
-            except Exception as e:
-                log.error(f"Error in policing loop: {e}", exc_info=True)
-            await asyncio.sleep(3600) # Run every hour
+        log.debug("ActivityTracker policing scheduler ready. Waiting for next midnight UTC.")
 
     # --------------------------------------------------------------------------------
     # Integration Helpers
