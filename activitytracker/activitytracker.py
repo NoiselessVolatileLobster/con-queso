@@ -41,6 +41,7 @@ class RunPolicingView(discord.ui.View):
         if self.message:
             await self.message.edit(view=self)
         
+        log.debug(f"[UI] Manual policing triggered by {interaction.user} via button in {self.ctx.guild.name}.")
         await interaction.followup.send("Initiating manual policing run...", ephemeral=True)
         await self.cog.run_policing(manual_report_ctx=self.ctx)
 
@@ -67,6 +68,9 @@ class ActivityTracker(commands.Cog):
             "preview_mode": True,
             "policing_rules": [], # List of dicts: {"level": int, "days": int, "action": str, "cooldown": int}
             "report_channel": None,
+            "warn_message": "**Inactivity Warning** in {guild}: You have been inactive for {days} days (Rule Lvl: {level}). Please engage to stay in the server!",
+            "kick_message": "**You have been kicked from {guild}**: Inactive for {days} days (Rule Lvl: {level}).",
+            "mention_message": "{member}, you have been marked as inactive ({days} days, Rule Lvl: {level}). Please engage to stay in the server!",
         }
 
         default_member = {
@@ -134,6 +138,7 @@ class ActivityTracker(commands.Cog):
         cog = self.bot.get_cog("WarnSystem")
         if cog and hasattr(cog, "api"):
             try:
+                log.debug(f"Calling WarnSystem API for {member} at severity level {level}.")
                 fails = await cog.api.warn(
                     guild=guild,
                     members=[member],
@@ -174,6 +179,19 @@ class ActivityTracker(commands.Cog):
                 return rule
                 
         return None
+
+    def _format_message(self, template: str, member: discord.Member, days: int, level: int) -> str:
+        """Safely format strings resolving user variables."""
+        try:
+            return template.format(
+                member=member.mention,
+                days=int(days),
+                level=level,
+                guild=member.guild.name
+            )
+        except Exception as e:
+            log.error(f"Failed to format message string: {e}")
+            return f"ActivityTracker Action: {days} days inactive (Rule Level: {level})."
 
     async def run_policing(self, manual_report_ctx=None):
         """Main logic for checking inactivity and performing automated actions."""
@@ -236,7 +254,7 @@ class ActivityTracker(commands.Cog):
                         if conf["preview_mode"]:
                             report_entries.append(entry)
                         else:
-                            await self._execute_policing_action(member, applicable_rule, int(days_inactive))
+                            await self._execute_policing_action(member, applicable_rule, int(days_inactive), conf)
                             # Update last policed timestamp only if we actually executed a warn/mention action
                             if action_type in ["warn", "mention"]:
                                 await self.config.member(member).last_policed.set(now)
@@ -262,9 +280,13 @@ class ActivityTracker(commands.Cog):
                     except discord.Forbidden:
                         log.warning(f"Missing permissions to send report to {report_channel.name} in {guild.name}")
 
-    async def _execute_policing_action(self, member: discord.Member, rule: dict, days: int):
+    async def _execute_policing_action(self, member: discord.Member, rule: dict, days: int, conf: dict):
         action = rule["action"].lower()
-        reason = f"ActivityTracker: Inactive for {days} days (Rule: >{rule['days']} days, Lvl <={rule['level']})."
+        level = rule['level']
+        
+        kick_reason = self._format_message(conf["kick_message"], member, days, level)
+        warn_reason = self._format_message(conf["warn_message"], member, days, level)
+        mention_msg = self._format_message(conf["mention_message"], member, days, level)
         
         try:
             if action == "kick":
@@ -272,42 +294,38 @@ class ActivityTracker(commands.Cog):
                     log.warning(f"Cannot kick {member} in {member.guild.name}: Role hierarchy prevents it.")
                     return
                 
-                # LOG: Executing Kick
                 log.debug(f"[Action] Executing KICK on {member} (ID: {member.id}) in {member.guild.name}.")
                 
                 # Try WarnSystem first (Level 3 = Kick). Handles DMs and modlogs before removing.
-                success = await self._warnsystem_action(member.guild, member, level=3, reason=reason)
+                success = await self._warnsystem_action(member.guild, member, level=3, reason=kick_reason)
                 if not success:
                     # Fallback to simple DM and native kick
                     try:
-                        await member.send(f"**You have been kicked from {member.guild.name}**: {reason}")
+                        await member.send(kick_reason)
                     except discord.Forbidden:
-                        pass
-                    await member.kick(reason=reason)
+                        log.debug(f"Could not DM {member} before kicking (Forbidden).")
+                    await member.kick(reason=f"ActivityTracker: {days} days inactive.")
             
             elif action == "warn":
-                # LOG: Executing Warn
                 log.debug(f"[Action] Executing WARN on {member} (ID: {member.id}) in {member.guild.name}.")
                 
                 # Try WarnSystem first (Level 1 = Warn). Handles DMs and modlogs.
-                success = await self._warnsystem_action(member.guild, member, level=1, reason=reason)
+                success = await self._warnsystem_action(member.guild, member, level=1, reason=warn_reason)
                 if not success:
                     try:
-                        await member.send(f"**Inactivity Warning** in {member.guild.name}: {reason}")
+                        await member.send(warn_reason)
                     except discord.Forbidden:
-                        pass
+                        log.debug(f"Could not DM {member} to warn (Forbidden).")
             
             elif action == "mention":
-                # LOG: Executing Mention
                 log.debug(f"[Action] Executing MENTION on {member} (ID: {member.id}) in {member.guild.name}.")
                 
-                conf = await self.config.guild(member.guild).all()
                 channel = member.guild.get_channel(conf["report_channel"])
                 if channel:
                     try:
-                        await channel.send(f"{member.mention}, you have been marked as inactive ({days} days). Please engage to stay in the server!")
+                        await channel.send(mention_msg)
                     except discord.Forbidden:
-                        pass
+                        log.debug(f"Missing permissions to send mention message in {channel.name}.")
         except discord.Forbidden:
             log.warning(f"Forbidden error executing {action} on {member} in {member.guild.name}")
         except Exception as e:
@@ -447,9 +465,17 @@ class ActivityTracker(commands.Cog):
             f"{humanize_list(channels) if channels else 'None'}\n"
         )
         
+        # Display configured messages
+        messages_info = (
+            f"Kick Message:\n{conf['kick_message']}\n\n"
+            f"Warn Message:\n{conf['warn_message']}\n\n"
+            f"Mention Message:\n{conf['mention_message']}\n"
+        )
+        
         await ctx.send("**ActivityTracker Settings**\n" + box(settings_info, lang="ini"))
         if conf["policing_rules"]:
             await ctx.send("**Policing Rules**\n" + box(rules_str, lang="css"))
+        await ctx.send("**Configured Messages**\n" + box(messages_info, lang="text"))
 
     @activitytrackerset.command(name="listusers")
     async def list_users(self, ctx, status_filter: Literal["active", "inactive", "hibernating", "cooldown"] = None):
@@ -560,6 +586,7 @@ class ActivityTracker(commands.Cog):
                     await self.config.member(member).last_active.set(now)
                     count += 1
         
+        log.debug(f"Manual override: {ctx.author} marked {count} users as active in {ctx.guild.name}.")
         await ctx.send(f"Done. Successfully marked {count} users as Active.")
 
     @activitytrackerset.command(name="preview")
@@ -577,6 +604,7 @@ class ActivityTracker(commands.Cog):
             )
 
         await self.config.guild(ctx.guild).preview_mode.set(toggle)
+        log.debug(f"Preview mode updated to {toggle} in {ctx.guild.name} by {ctx.author}.")
         
         status_str = "ENABLED" if toggle else "DISABLED"
         msg_text = f"Preview mode is now **{status_str}**."
@@ -591,6 +619,7 @@ class ActivityTracker(commands.Cog):
     @activitytrackerset.command(name="run")
     async def manual_run(self, ctx):
         """Manually trigger a policing run and output the report here."""
+        log.debug(f"Manual policing run triggered by {ctx.author} in {ctx.guild.name}.")
         await ctx.send("Running policing check...")
         await self.run_policing(manual_report_ctx=ctx)
 
@@ -615,6 +644,7 @@ class ActivityTracker(commands.Cog):
                 r.append({"level": level, "days": days, "action": action, "cooldown": cooldown})
                 
         await ctx.tick()
+        log.debug(f"Rule configured in {ctx.guild.name} by {ctx.author}: Level<={level}, {days}d -> {action} (cd: {cooldown}d)")
         if updated:
             await ctx.send(f"Rule updated: Users Lvl <= {level} inactive for {days}+ days -> {action.upper()} (Cooldown: {cooldown} days)")
         else:
@@ -629,6 +659,7 @@ class ActivityTracker(commands.Cog):
             
             if len(r) < original_len:
                 await ctx.send("Rule removed.")
+                log.debug(f"Rule removed in {ctx.guild.name} by {ctx.author}: Level<={level}, {days}d")
             else:
                 await ctx.send("No matching rule found.")
 
@@ -637,6 +668,7 @@ class ActivityTracker(commands.Cog):
         """Clear all policing rules."""
         await self.config.guild(ctx.guild).policing_rules.set([])
         await ctx.tick()
+        log.debug(f"All rules cleared in {ctx.guild.name} by {ctx.author}.")
 
     @activitytrackerset.command()
     async def reportchannel(self, ctx, channel: discord.TextChannel):
@@ -675,11 +707,54 @@ class ActivityTracker(commands.Cog):
         await self.config.guild(ctx.guild).inactivity_days.set(days)
         await ctx.send(f"Users are considered inactive after {days} days.")
 
+    @activitytrackerset.command(name="warnmessage")
+    async def set_warn_message(self, ctx, *, message: str):
+        """Set the DM and Modlog message used when warning users.
+        
+        Available variables:
+        {days}   - Number of days inactive
+        {level}  - Rule level cap triggered
+        {guild}  - Name of the server
+        {member} - Mention of the user
+        """
+        await self.config.guild(ctx.guild).warn_message.set(message)
+        test_msg = message.format(days=30, level=1, guild=ctx.guild.name, member=ctx.author.mention)
+        await ctx.send(f"Warn message updated successfully.\n**Preview:**\n{test_msg}")
+
+    @activitytrackerset.command(name="kickmessage")
+    async def set_kick_message(self, ctx, *, message: str):
+        """Set the DM and Modlog message used when kicking users.
+        
+        Available variables:
+        {days}   - Number of days inactive
+        {level}  - Rule level cap triggered
+        {guild}  - Name of the server
+        {member} - Mention of the user
+        """
+        await self.config.guild(ctx.guild).kick_message.set(message)
+        test_msg = message.format(days=60, level=2, guild=ctx.guild.name, member=ctx.author.mention)
+        await ctx.send(f"Kick message updated successfully.\n**Preview:**\n{test_msg}")
+
+    @activitytrackerset.command(name="mentionmessage")
+    async def set_mention_message(self, ctx, *, message: str):
+        """Set the message used when mentioning inactive users in the report channel.
+        
+        Available variables:
+        {days}   - Number of days inactive
+        {level}  - Rule level cap triggered
+        {guild}  - Name of the server
+        {member} - Mention of the user
+        """
+        await self.config.guild(ctx.guild).mention_message.set(message)
+        test_msg = message.format(days=45, level=1, guild=ctx.guild.name, member=ctx.author.mention)
+        await ctx.send(f"Mention message updated successfully.\n**Preview:**\n{test_msg}")
+
     @commands.command()
     @checks.mod_or_permissions(manage_nicknames=True)
     async def markactive(self, ctx, member: discord.Member):
         """Manually mark a user as active as of right now"""
         await self.config.member(member).last_active.set(datetime.utcnow().timestamp())
+        log.debug(f"{ctx.author} manually marked {member} as active in {ctx.guild.name}.")
         await ctx.send(f"Marked {member.display_name} as active.")
 
     @commands.command()
