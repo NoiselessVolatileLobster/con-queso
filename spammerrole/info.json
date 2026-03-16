@@ -1,0 +1,11 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "SpammerRole",
+    "short": "Assigns a role to users with the Discord spammer public flag.",
+    "description": "Automatically grants a specific role to users who have the public spammer flag triggered by Discord.",
+    "end_user_data_statement": "This cog does not persistently store data about users.",
+    "install_msg": "Thanks for installing SpammerRole! Use `[p]spammerroleset` to configure the cog.",
+    "min_bot_version": "3.5.22",
+    "requirements": [],
+    "tags": ["spammer", "moderation", "utility"]
+}
