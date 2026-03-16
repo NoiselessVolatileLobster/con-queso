@@ -1,0 +1,12 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "TopicChange",
+    "short": "Allows users to seamlessly prompt a random topic change.",
+    "description": "Provides an interactive way to change channel topics via slash commands, including configurable GIFs, admin approval lists, and trusted user topic suggestions.",
+    "install_msg": "Thank you for installing the Topic Change cog! Use `[p]topicchangeset` to configure your settings, roles, and GIF.",
+    "version": "1.0.0",
+    "min_bot_version": "3.5.22",
+    "requirements": ["tabulate"],
+    "tags": ["utility", "chat", "engagement", "fun", "topics"],
+    "end_user_data_statement": "This cog stores Discord User IDs to track who submitted topic suggestions. This data can be removed upon request by removing the topic suggestion."
+}
