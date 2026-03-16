@@ -383,7 +383,7 @@ class VCText(commands.Cog):
                                     formatted_msg = raw_msg.replace("{user}", member.display_name)\
                                                            .replace("{user.mention}", member.mention)\
                                                            .replace("{role}", role.name)\
-                                                           .replace("{vc}", after.channel.name)
+                                                           .replace("{vc}", after.channel.mention)
                                     await tc.send(formatted_msg)
                         except discord.Forbidden:
                             log.debug(f"[VCText] Permissions error adding role {role.name} to {member}.")
@@ -401,7 +401,7 @@ class VCText(commands.Cog):
                         raw_msg = ping_conf.get("msg", "A tracked voice channel is now active!")
                         formatted_msg = raw_msg.replace("{user}", member.display_name)\
                                                .replace("{user.mention}", member.mention)\
-                                               .replace("{vc}", after.channel.name)
+                                               .replace("{vc}", after.channel.mention)
                         try:
                             await tc.send(f"{role.mention}\n{formatted_msg}", allowed_mentions=discord.AllowedMentions(roles=[role]))
                             log.debug(f"[VCText] Ping successfully sent to {tc.name} for {after.channel.name}.")
