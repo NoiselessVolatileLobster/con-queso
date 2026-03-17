@@ -2,10 +2,10 @@
     "author": ["NoiselessVolatileLobster"],
     "name": "VCText",
     "short": "Ping a specified role when the first person joins a configured Voice Channel.",
-    "description": "Monitors specified voice channels. When the first person joins an empty configured voice channel, it will post a custom message and ping a designated role in a specific text channel. Includes interactive Component v2 setup forms.",
+    "description": "Monitors specified voice channels. When the first person joins an empty configured voice channel, it will post a custom message and ping a designated role. Includes anti-spam cooldown tracking for users who frequently disconnect/reconnect or manually mention the role.",
     "end_user_data_statement": "This cog does not persistently store data or PII about end users.",
     "install_msg": "Thanks for installing VCText! Use `[p]vctextset` to begin configuring your voice and text channels.",
     "min_bot_version": "3.5.0",
     "requirements": ["tabulate"],
-    "tags": ["voice", "ping", "notification", "role"]
+    "tags": ["voice", "ping", "notification", "role", "anti-spam", "cooldown"]
 }

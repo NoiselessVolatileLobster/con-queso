@@ -1,4 +1,5 @@
 import logging
+import time
 import discord
 from discord.ui import Modal, TextInput, View, ChannelSelect, RoleSelect, Button
 from tabulate import tabulate
@@ -30,6 +31,7 @@ class VCPingSetupModal(Modal, title="Set First-Join Ping Message"):
         self.view_instance.check_complete()
         await interaction.response.edit_message(content=self.view_instance.get_status_text(), view=self.view_instance)
 
+
 class VCRoleSetupModal(Modal, title="Set Auto-Role Mention Message"):
     message_input = TextInput(
         label="Mention Message",
@@ -49,6 +51,36 @@ class VCRoleSetupModal(Modal, title="Set Auto-Role Mention Message"):
         self.view_instance.custom_message = self.message_input.value
         self.view_instance.check_complete()
         await interaction.response.edit_message(content=self.view_instance.get_status_text(), view=self.view_instance)
+
+
+class VCCooldownModal(Modal, title="Set Mention Cooldown"):
+    hours_input = TextInput(
+        label="Cooldown in Hours",
+        style=discord.TextStyle.short,
+        placeholder="e.g. 24",
+        default="24",
+        required=True,
+        max_length=5
+    )
+
+    def __init__(self, cog, ctx):
+        super().__init__()
+        self.cog = cog
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            hours = float(self.hours_input.value)
+            if hours < 0:
+                raise ValueError
+            await self.cog.config.guild(self.ctx.guild).cooldown_hours.set(hours)
+            log.debug(f"[VCText] Cooldown set to {hours} hours by {interaction.user}.")
+            await interaction.response.edit_message(
+                content=f"✅ **Cooldown successfully updated to {hours} hours.**\nUsers will not trigger duplicate role pings within this timeframe.", 
+                view=None
+            )
+        except ValueError:
+            await interaction.response.edit_message(content="❌ **Invalid input. Please enter a valid positive number.**", view=None)
 
 
 # --- UI VIEWS ---
@@ -118,6 +150,7 @@ class VCPingSetupView(View):
     async def back_btn(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(content=self.parent_view.get_status_text(), view=self.parent_view)
 
+
 class VCRoleSetupView(View):
     def __init__(self, cog, ctx, parent_view):
         super().__init__(timeout=300)
@@ -183,6 +216,7 @@ class VCRoleSetupView(View):
     async def back_btn(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(content=self.parent_view.get_status_text(), view=self.parent_view)
 
+
 class VCRemoveView(View):
     def __init__(self, cog, ctx, parent_view):
         super().__init__(timeout=300)
@@ -239,6 +273,7 @@ class VCRemoveView(View):
     async def back_btn(self, interaction: discord.Interaction, button: Button):
         await interaction.response.edit_message(content=self.parent_view.get_status_text(), view=self.parent_view)
 
+
 class VCDashboardView(View):
     def __init__(self, cog, ctx):
         super().__init__(timeout=300)
@@ -266,6 +301,10 @@ class VCDashboardView(View):
     async def remove_config(self, interaction: discord.Interaction, button: Button):
         view = VCRemoveView(self.cog, self.ctx, self)
         await interaction.response.edit_message(content=view.get_status_text(), view=view)
+        
+    @discord.ui.button(label="⏱️ Set Cooldown", style=discord.ButtonStyle.secondary, row=1)
+    async def set_cooldown(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(VCCooldownModal(self.cog, self.ctx))
 
 
 # --- MAIN COG ---
@@ -280,11 +319,9 @@ class VCText(commands.Cog):
         self.config = Config.get_conf(self, identifier=83726194723, force_registration=True)
         
         default_guild = {
-            "channels": {}  
-            # "vc_id": { 
-            #    "ping": { "tc_id": int, "role_id": int, "msg": str },
-            #    "role": { "tc_id": int, "role_id": int, "msg": str }
-            # }
+            "channels": {},
+            "cooldown_hours": 24.0,       # The required gap between first-join pings
+            "user_last_mentions": {}      # "user_id": { "role_id": timestamp }
         }
         self.config.register_guild(**default_guild)
         
@@ -318,8 +355,6 @@ class VCText(commands.Cog):
                 log.debug(f"[VCText] Migrating legacy role mappings for guild {guild_id}")
                 for vc_id, role_id in legacy_roles.items():
                     if vc_id not in channels: channels[vc_id] = {}
-                    # Legacy didn't have a TC/Msg for the role mention, so we omit TC/Msg data, 
-                    # ensuring the logic in on_voice_state_update handles missing TC smoothly.
                     channels[vc_id]["role"] = {
                         "tc_id": None,
                         "role_id": role_id,
@@ -333,6 +368,38 @@ class VCText(commands.Cog):
                 log.debug(f"[VCText] Migration complete for guild {guild_id}.")
 
     @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Listen for manual mentions of tracked roles to update their cooldown."""
+        if message.author.bot or not message.guild:
+            return
+            
+        if not message.role_mentions:
+            return
+
+        guild_data = await self.config.guild(message.guild).all()
+        channels = guild_data.get("channels", {})
+        
+        # Aggregate all ping roles configured in this guild
+        ping_role_ids = set()
+        for vc_id, conf in channels.items():
+            if "ping" in conf:
+                ping_role_ids.add(conf["ping"]["role_id"])
+                
+        # Find which tracked roles were mentioned in this message
+        mentioned_ping_roles = [r for r in message.role_mentions if r.id in ping_role_ids]
+        
+        if mentioned_ping_roles:
+            async with self.config.guild(message.guild).user_last_mentions() as ulm:
+                uid = str(message.author.id)
+                if uid not in ulm:
+                    ulm[uid] = {}
+                
+                now = time.time()
+                for role in mentioned_ping_roles:
+                    ulm[uid][str(role.id)] = now
+                    log.debug(f"[VCText] Recorded manual mention of role {role.name} by {message.author} in {message.guild.name}. Updating cooldown timestamp.")
+
+    @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
         if member.bot:
             return
@@ -341,7 +408,8 @@ class VCText(commands.Cog):
             return
             
         guild = member.guild
-        channels_conf = await self.config.guild(guild).channels()
+        guild_data = await self.config.guild(guild).all()
+        channels_conf = guild_data.get("channels", {})
 
         # --- ROLE REMOVAL LOGIC (Leaving a VC) ---
         if before.channel:
@@ -390,23 +458,44 @@ class VCText(commands.Cog):
                         except Exception as e:
                             log.debug(f"[VCText] Unexpected error adding role: {e}")
 
-                # 2. FIRST-JOIN PING
+                # 2. FIRST-JOIN PING (WITH COOLDOWN LOGIC)
                 if "ping" in conf and len(after.channel.members) == 1:
-                    log.debug(f"[VCText] User {member} is FIRST to join {after.channel.name}. Initiating ping sequence.")
+                    log.debug(f"[VCText] User {member} is FIRST to join {after.channel.name}. Evaluating ping sequence.")
                     ping_conf = conf["ping"]
                     tc = guild.get_channel(ping_conf["tc_id"])
                     role = guild.get_role(ping_conf["role_id"])
                     
                     if tc and role:
-                        raw_msg = ping_conf.get("msg", "A tracked voice channel is now active!")
-                        formatted_msg = raw_msg.replace("{user}", member.display_name)\
-                                               .replace("{user.mention}", member.mention)\
-                                               .replace("{vc}", after.channel.mention)
-                        try:
-                            await tc.send(f"{role.mention}\n{formatted_msg}", allowed_mentions=discord.AllowedMentions(roles=[role]))
-                            log.debug(f"[VCText] Ping successfully sent to {tc.name} for {after.channel.name}.")
-                        except discord.Forbidden:
-                            log.debug(f"[VCText] Permissions error sending ping in {tc.name}.")
+                        # Process Cooldowns
+                        cooldown_hours = guild_data.get("cooldown_hours", 24.0)
+                        cooldown_seconds = cooldown_hours * 3600
+                        ulm = guild_data.get("user_last_mentions", {})
+                        
+                        last_mention_time = ulm.get(str(member.id), {}).get(str(role.id), 0)
+                        now = time.time()
+                        
+                        if (now - last_mention_time) < cooldown_seconds:
+                            log.debug(f"[VCText] User {member} mentioned role {role.name} recently (within {cooldown_hours} hours). Skipping ping.")
+                        else:
+                            # Time to send the ping
+                            raw_msg = ping_conf.get("msg", "A tracked voice channel is now active!")
+                            formatted_msg = raw_msg.replace("{user}", member.display_name)\
+                                                   .replace("{user.mention}", member.mention)\
+                                                   .replace("{vc}", after.channel.mention)
+                            try:
+                                await tc.send(f"{role.mention}\n{formatted_msg}", allowed_mentions=discord.AllowedMentions(roles=[role]))
+                                log.debug(f"[VCText] Ping successfully sent to {tc.name} for {after.channel.name}.")
+                                
+                                # Record this successful mention to restart their cooldown timer
+                                async with self.config.guild(guild).user_last_mentions() as ulm_db:
+                                    uid = str(member.id)
+                                    if uid not in ulm_db:
+                                        ulm_db[uid] = {}
+                                    ulm_db[uid][str(role.id)] = now
+                                    log.debug(f"[VCText] Cooldown timestamp updated for user {member} & role {role.name}.")
+                                    
+                            except discord.Forbidden:
+                                log.debug(f"[VCText] Permissions error sending ping in {tc.name}.")
                     else:
                         log.debug(f"[VCText] Ping failed: Missing TC ({ping_conf.get('tc_id')}) or Role ({ping_conf.get('role_id')}).")
 
@@ -431,7 +520,10 @@ class VCText(commands.Cog):
         """View a table of all configured VC Text logic for this server."""
         log.debug(f"[VCText] View command invoked by {ctx.author} in {ctx.guild.name}.")
         
-        channels = await self.config.guild(ctx.guild).channels()
+        guild_data = await self.config.guild(ctx.guild).all()
+        channels = guild_data.get("channels", {})
+        cooldown = guild_data.get("cooldown_hours", 24.0)
+        
         if not channels:
             return await ctx.send("No VC Text logic is currently configured for this server.")
 
@@ -459,7 +551,11 @@ class VCText(commands.Cog):
 
             table_data.append([vc_name, ping_str, role_str])
 
+        header = f"**⚙️ Current Mention Cooldown**: {cooldown} hours\n\n"
         rendered_table = tabulate(table_data, headers=["Voice Channel", "First-Join Ping Logic", "Auto-Role Logic"], tablefmt="grid")
         
-        for page in pagify(rendered_table, page_length=1980):
-            await ctx.send(box(page, lang="none"))
+        for i, page in enumerate(pagify(rendered_table, page_length=1900)):
+            if i == 0:
+                await ctx.send(f"{header}{box(page, lang='none')}")
+            else:
+                await ctx.send(box(page, lang="none"))
