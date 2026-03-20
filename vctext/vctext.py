@@ -83,6 +83,48 @@ class VCCooldownModal(Modal, title="Set Mention Cooldown"):
             await interaction.response.edit_message(content="❌ **Invalid input. Please enter a valid positive number.**", view=None)
 
 
+class VCSoloModal(Modal, title="Set Solo Cooldown"):
+    threshold_input = TextInput(
+        label="Solo Points Threshold",
+        style=discord.TextStyle.short,
+        placeholder="e.g. 3",
+        default="3",
+        required=True,
+        max_length=3
+    )
+    hours_input = TextInput(
+        label="Cooldown Duration in Hours",
+        style=discord.TextStyle.short,
+        placeholder="e.g. 2.0",
+        default="2.0",
+        required=True,
+        max_length=5
+    )
+
+    def __init__(self, cog, ctx):
+        super().__init__()
+        self.cog = cog
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            threshold = int(self.threshold_input.value)
+            hours = float(self.hours_input.value)
+            if threshold < 1 or hours < 0:
+                raise ValueError
+            
+            await self.cog.config.guild(self.ctx.guild).solo_threshold.set(threshold)
+            await self.cog.config.guild(self.ctx.guild).solo_cooldown_hours.set(hours)
+            
+            log.debug(f"[VCText] Solo Cooldown set to {threshold} threshold, {hours} hours by {interaction.user}.")
+            await interaction.response.edit_message(
+                content=f"✅ **Solo Cooldown updated.**\nUsers doing solo joins {threshold} times will skip pinging for {hours} hours.", 
+                view=None
+            )
+        except ValueError:
+            await interaction.response.edit_message(content="❌ **Invalid input. Please enter valid numbers.**", view=None)
+
+
 # --- UI VIEWS ---
 
 class VCPingSetupView(View):
@@ -302,9 +344,13 @@ class VCDashboardView(View):
         view = VCRemoveView(self.cog, self.ctx, self)
         await interaction.response.edit_message(content=view.get_status_text(), view=view)
         
-    @discord.ui.button(label="⏱️ Set Cooldown", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="⏱️ Set Role Cooldown", style=discord.ButtonStyle.secondary, row=1)
     async def set_cooldown(self, interaction: discord.Interaction, button: Button):
         await interaction.response.send_modal(VCCooldownModal(self.cog, self.ctx))
+
+    @discord.ui.button(label="👤 Configure Solo Cooldown", style=discord.ButtonStyle.secondary, row=1)
+    async def set_solo_cooldown(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_modal(VCSoloModal(self.cog, self.ctx))
 
 
 # --- MAIN COG ---
@@ -320,10 +366,17 @@ class VCText(commands.Cog):
         
         default_guild = {
             "channels": {},
-            "cooldown_hours": 24.0,       # The required gap between first-join pings
-            "user_last_mentions": {}      # "user_id": { "role_id": timestamp }
+            "cooldown_hours": 24.0,       # Required gap between general first-join pings per role
+            "user_last_mentions": {},     # "user_id": { "role_id": timestamp }
+            "solo_threshold": 3,          # How many solo VC sessions triggers the Solo Cooldown
+            "solo_cooldown_hours": 2.0,   # How long the Solo Cooldown lasts
+            "solo_users": {}              # "user_id": { "points": int, "cooldown_until": float }
         }
         self.config.register_guild(**default_guild)
+        
+        # Track active "solo" sessions in memory to prevent point spam
+        # Maps vc_id -> {"user_id": int, "solo": bool}
+        self.active_sessions: dict[int, dict] = {}
         
         # Initiate migration process in background task
         self.bot.loop.create_task(self.migrate_legacy_data())
@@ -367,9 +420,45 @@ class VCText(commands.Cog):
                 await self.config.guild_from_id(guild_id).channels.set(channels)
                 log.debug(f"[VCText] Migration complete for guild {guild_id}.")
 
+    async def _award_solo_point(self, member: discord.Member):
+        """Internal logic to add a solo point to a user, and check cooldown."""
+        async with self.config.guild(member.guild).all() as gd:
+            threshold = gd.get("solo_threshold", 3)
+            cooldown_hours = gd.get("solo_cooldown_hours", 2.0)
+            
+            if "solo_users" not in gd:
+                gd["solo_users"] = {}
+                
+            uid = str(member.id)
+            if uid not in gd["solo_users"]:
+                gd["solo_users"][uid] = {"points": 0, "cooldown_until": 0.0}
+                
+            user_data = gd["solo_users"][uid]
+            now = time.time()
+            
+            # If a previous solo cooldown expired, reset points before we add the new one.
+            if user_data["cooldown_until"] > 0 and now > user_data["cooldown_until"]:
+                user_data["points"] = 0
+                user_data["cooldown_until"] = 0.0
+                
+            # If they are CURRENTLY in an active cooldown, ignore awarding points.
+            if now <= user_data["cooldown_until"]:
+                log.debug(f"[VCText] {member} is already in solo cooldown. Ignoring point.")
+                return
+                
+            # Increment point since they were solo the entire time
+            user_data["points"] += 1
+            log.debug(f"[VCText] Awarded solo point to {member}. Total: {user_data['points']}")
+            
+            # Check if they crossed the threshold
+            if user_data["points"] >= threshold:
+                user_data["cooldown_until"] = now + (cooldown_hours * 3600)
+                log.debug(f"[VCText] {member} hit solo threshold! Cooldown active for {cooldown_hours}h.")
+
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Listen for manual mentions of tracked roles to update their cooldown."""
+        """Listen for manual mentions of tracked roles to update their mention cooldown."""
         if message.author.bot or not message.guild:
             return
             
@@ -397,7 +486,7 @@ class VCText(commands.Cog):
                 now = time.time()
                 for role in mentioned_ping_roles:
                     ulm[uid][str(role.id)] = now
-                    log.debug(f"[VCText] Recorded manual mention of role {role.name} by {message.author} in {message.guild.name}. Updating cooldown timestamp.")
+                    log.debug(f"[VCText] Recorded manual mention of role {role.name} by {message.author} in {message.guild.name}. Updating mention cooldown timestamp.")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState):
@@ -411,29 +500,52 @@ class VCText(commands.Cog):
         guild_data = await self.config.guild(guild).all()
         channels_conf = guild_data.get("channels", {})
 
-        # --- ROLE REMOVAL LOGIC (Leaving a VC) ---
+        # --- ROLE REMOVAL & SOLO TRACKING (Leaving a VC) ---
         if before.channel:
             before_vc_id = str(before.channel.id)
-            if before_vc_id in channels_conf and "role" in channels_conf[before_vc_id]:
-                role_conf = channels_conf[before_vc_id]["role"]
-                role = guild.get_role(role_conf["role_id"])
-                
-                if role and role in member.roles:
-                    try:
-                        await member.remove_roles(role, reason=f"Left voice channel {before.channel.name}")
-                        log.debug(f"[VCText] Removed role {role.name} from {member} (Left VC).")
-                    except discord.Forbidden:
-                        log.debug(f"[VCText] Permissions error removing role {role.name} from {member}.")
-                    except Exception as e:
-                        log.debug(f"[VCText] Unexpected error removing role: {e}")
+            if before_vc_id in channels_conf:
+                # 1. Handle Solo Tracking Exit Logic
+                if before.channel.id in self.active_sessions:
+                    session = self.active_sessions[before.channel.id]
+                    if session["user_id"] == member.id:
+                        if session["solo"]:
+                            # The user joined an empty channel and remained alone the ENTIRE time!
+                            await self._award_solo_point(member)
+                        # Purge session since the tracked original user left
+                        del self.active_sessions[before.channel.id]
 
-        # --- JOIN LOGIC (Auto-Role + Mentions + Pings) ---
+                # 2. Handle Role Removal Logic
+                if "role" in channels_conf[before_vc_id]:
+                    role_conf = channels_conf[before_vc_id]["role"]
+                    role = guild.get_role(role_conf["role_id"])
+                    
+                    if role and role in member.roles:
+                        try:
+                            await member.remove_roles(role, reason=f"Left voice channel {before.channel.name}")
+                            log.debug(f"[VCText] Removed role {role.name} from {member} (Left VC).")
+                        except discord.Forbidden:
+                            log.debug(f"[VCText] Permissions error removing role {role.name} from {member}.")
+                        except Exception as e:
+                            log.debug(f"[VCText] Unexpected error removing role: {e}")
+
+        # --- JOIN LOGIC (Auto-Role + Mentions + Pings + Solo Sessions) ---
         if after.channel:
             after_vc_id = str(after.channel.id)
             if after_vc_id in channels_conf:
                 conf = channels_conf[after_vc_id]
 
-                # 1. AUTO-ROLE & MENTION
+                # 1. Setup Solo Tracking
+                if len(after.channel.members) == 1:
+                    # Brand new solo session
+                    self.active_sessions[after.channel.id] = {"user_id": member.id, "solo": True}
+                    log.debug(f"[VCText] Tracked solo session started for {member} in {after.channel.name}")
+                else:
+                    # Someone else is here. Previous solo session is broken.
+                    if after.channel.id in self.active_sessions:
+                        self.active_sessions[after.channel.id]["solo"] = False
+                        log.debug(f"[VCText] {member} joined {after.channel.name}. Invalidating active solo session.")
+
+                # 2. AUTO-ROLE & MENTION
                 if "role" in conf:
                     role_conf = conf["role"]
                     role = guild.get_role(role_conf["role_id"])
@@ -458,44 +570,60 @@ class VCText(commands.Cog):
                         except Exception as e:
                             log.debug(f"[VCText] Unexpected error adding role: {e}")
 
-                # 2. FIRST-JOIN PING (WITH COOLDOWN LOGIC)
+                # 3. FIRST-JOIN PING (WITH COOLDOWN LOGIC)
                 if "ping" in conf and len(after.channel.members) == 1:
                     log.debug(f"[VCText] User {member} is FIRST to join {after.channel.name}. Evaluating ping sequence.")
                     ping_conf = conf["ping"]
                     tc = guild.get_channel(ping_conf["tc_id"])
                     role = guild.get_role(ping_conf["role_id"])
+                    now = time.time()
                     
                     if tc and role:
-                        # Process Cooldowns
-                        cooldown_hours = guild_data.get("cooldown_hours", 24.0)
-                        cooldown_seconds = cooldown_hours * 3600
-                        ulm = guild_data.get("user_last_mentions", {})
+                        # Check Solo Cooldowns first
+                        solo_users = guild_data.get("solo_users", {})
+                        user_solo_data = solo_users.get(str(member.id), {"points": 0, "cooldown_until": 0.0})
                         
-                        last_mention_time = ulm.get(str(member.id), {}).get(str(role.id), 0)
-                        now = time.time()
-                        
-                        if (now - last_mention_time) < cooldown_seconds:
-                            log.debug(f"[VCText] User {member} mentioned role {role.name} recently (within {cooldown_hours} hours). Skipping ping.")
+                        # Lazy expiration reset
+                        if user_solo_data["cooldown_until"] > 0 and now > user_solo_data["cooldown_until"]:
+                            async with self.config.guild(guild).solo_users() as su:
+                                if str(member.id) in su:
+                                    su[str(member.id)]["points"] = 0
+                                    su[str(member.id)]["cooldown_until"] = 0.0
+                            user_solo_data["points"] = 0
+                            user_solo_data["cooldown_until"] = 0.0
+
+                        if user_solo_data["cooldown_until"] >= now:
+                            log.debug(f"[VCText] {member} is currently in a SOLO Cooldown. Skipping ping role sequence.")
                         else:
-                            # Time to send the ping
-                            raw_msg = ping_conf.get("msg", "A tracked voice channel is now active!")
-                            formatted_msg = raw_msg.replace("{user}", member.display_name)\
-                                                   .replace("{user.mention}", member.mention)\
-                                                   .replace("{vc}", after.channel.mention)
-                            try:
-                                await tc.send(f"{role.mention}\n{formatted_msg}", allowed_mentions=discord.AllowedMentions(roles=[role]))
-                                log.debug(f"[VCText] Ping successfully sent to {tc.name} for {after.channel.name}.")
-                                
-                                # Record this successful mention to restart their cooldown timer
-                                async with self.config.guild(guild).user_last_mentions() as ulm_db:
-                                    uid = str(member.id)
-                                    if uid not in ulm_db:
-                                        ulm_db[uid] = {}
-                                    ulm_db[uid][str(role.id)] = now
-                                    log.debug(f"[VCText] Cooldown timestamp updated for user {member} & role {role.name}.")
+                            # User is NOT in a Solo Cooldown. Now check Mention Cooldown.
+                            cooldown_hours = guild_data.get("cooldown_hours", 24.0)
+                            cooldown_seconds = cooldown_hours * 3600
+                            ulm = guild_data.get("user_last_mentions", {})
+                            
+                            last_mention_time = ulm.get(str(member.id), {}).get(str(role.id), 0)
+                            
+                            if (now - last_mention_time) < cooldown_seconds:
+                                log.debug(f"[VCText] User {member} mentioned role {role.name} recently (within {cooldown_hours} hours). Skipping ping.")
+                            else:
+                                # Time to send the ping
+                                raw_msg = ping_conf.get("msg", "A tracked voice channel is now active!")
+                                formatted_msg = raw_msg.replace("{user}", member.display_name)\
+                                                       .replace("{user.mention}", member.mention)\
+                                                       .replace("{vc}", after.channel.mention)
+                                try:
+                                    await tc.send(f"{role.mention}\n{formatted_msg}", allowed_mentions=discord.AllowedMentions(roles=[role]))
+                                    log.debug(f"[VCText] Ping successfully sent to {tc.name} for {after.channel.name}.")
                                     
-                            except discord.Forbidden:
-                                log.debug(f"[VCText] Permissions error sending ping in {tc.name}.")
+                                    # Record this successful mention to restart their mention cooldown timer
+                                    async with self.config.guild(guild).user_last_mentions() as ulm_db:
+                                        uid = str(member.id)
+                                        if uid not in ulm_db:
+                                            ulm_db[uid] = {}
+                                        ulm_db[uid][str(role.id)] = now
+                                        log.debug(f"[VCText] Mention cooldown updated for user {member} & role {role.name}.")
+                                        
+                                except discord.Forbidden:
+                                    log.debug(f"[VCText] Permissions error sending ping in {tc.name}.")
                     else:
                         log.debug(f"[VCText] Ping failed: Missing TC ({ping_conf.get('tc_id')}) or Role ({ping_conf.get('role_id')}).")
 
@@ -515,6 +643,39 @@ class VCText(commands.Cog):
         view = VCDashboardView(self, ctx)
         await ctx.send(view.get_status_text(), view=view)
 
+    @vctextset.command(name="solostats", aliases=["solopoints"])
+    async def vctextset_solostats(self, ctx: commands.Context):
+        """View solo VC points and active cooldowns for users in the server."""
+        solo_users = await self.config.guild(ctx.guild).solo_users()
+        if not solo_users:
+            return await ctx.send("No users have accumulated solo VC points yet.")
+            
+        table_data = []
+        now = time.time()
+        for uid, data in solo_users.items():
+            member = ctx.guild.get_member(int(uid))
+            name = member.display_name if member else f"Unknown ({uid})"
+            
+            points = data.get("points", 0)
+            cooldown = data.get("cooldown_until", 0.0)
+            
+            if cooldown > now:
+                status = f"On Cooldown ({round((cooldown - now)/3600, 1)}h left)"
+            else:
+                status = "Active"
+                if cooldown > 0: # Expired but not reset lazily yet
+                    points = 0
+                    
+            if points > 0 or cooldown > now:
+                table_data.append([name, points, status])
+                
+        if not table_data:
+            return await ctx.send("No users currently have solo VC points or active cooldowns.")
+            
+        rendered = tabulate(table_data, headers=["User", "Solo Points", "Status"], tablefmt="grid")
+        for page in pagify(rendered, page_length=1900):
+            await ctx.send(box(page, lang="none"))
+
     @vctextset.command(name="view", aliases=["list"])
     async def vctextset_view(self, ctx: commands.Context):
         """View a table of all configured VC Text logic for this server."""
@@ -523,6 +684,8 @@ class VCText(commands.Cog):
         guild_data = await self.config.guild(ctx.guild).all()
         channels = guild_data.get("channels", {})
         cooldown = guild_data.get("cooldown_hours", 24.0)
+        solo_threshold = guild_data.get("solo_threshold", 3)
+        solo_hours = guild_data.get("solo_cooldown_hours", 2.0)
         
         if not channels:
             return await ctx.send("No VC Text logic is currently configured for this server.")
@@ -551,7 +714,10 @@ class VCText(commands.Cog):
 
             table_data.append([vc_name, ping_str, role_str])
 
-        header = f"**⚙️ Current Mention Cooldown**: {cooldown} hours\n\n"
+        header = (
+            f"**⚙️ Role Mention Cooldown**: {cooldown} hours\n"
+            f"**👤 Solo VC Cooldown**: Triggered after {solo_threshold} solo sessions for {solo_hours} hours\n\n"
+        )
         rendered_table = tabulate(table_data, headers=["Voice Channel", "First-Join Ping Logic", "Auto-Role Logic"], tablefmt="grid")
         
         for i, page in enumerate(pagify(rendered_table, page_length=1900)):
