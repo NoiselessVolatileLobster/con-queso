@@ -628,23 +628,9 @@ class VCText(commands.Cog):
                         log.debug(f"[VCText] Ping failed: Missing TC ({ping_conf.get('tc_id')}) or Role ({ping_conf.get('role_id')}).")
 
 
-    @commands.group(name="vctextset", invoke_without_command=True)
-    @commands.admin_or_permissions(manage_guild=True)
-    async def vctextset(self, ctx: commands.Context):
-        """Admin commands to manage Unified VC Text Logic."""
-        await ctx.send_help()
-
-    @vctextset.command(name="dashboard", aliases=["form", "setup"])
-    async def vctextset_dashboard(self, ctx: commands.Context):
-        """
-        Open the interactive VC Text Configuration Dashboard.
-        """
-        log.debug(f"[VCText] Dashboard invoked by {ctx.author} in {ctx.guild.name}.")
-        view = VCDashboardView(self, ctx)
-        await ctx.send(view.get_status_text(), view=view)
-
-    @vctextset.command(name="solostats", aliases=["solopoints"])
-    async def vctextset_solostats(self, ctx: commands.Context):
+    @commands.command(name="vcsolo", aliases=["solostats", "solopoints"])
+    @commands.mod_or_permissions(manage_messages=True)
+    async def vcsolo(self, ctx: commands.Context):
         """View solo VC points and active cooldowns for users in the server."""
         solo_users = await self.config.guild(ctx.guild).solo_users()
         if not solo_users:
@@ -675,6 +661,22 @@ class VCText(commands.Cog):
         rendered = tabulate(table_data, headers=["User", "Solo Points", "Status"], tablefmt="grid")
         for page in pagify(rendered, page_length=1900):
             await ctx.send(box(page, lang="none"))
+
+
+    @commands.group(name="vctextset", invoke_without_command=True)
+    @commands.admin_or_permissions(manage_guild=True)
+    async def vctextset(self, ctx: commands.Context):
+        """Admin commands to manage Unified VC Text Logic."""
+        await ctx.send_help()
+
+    @vctextset.command(name="dashboard", aliases=["form", "setup"])
+    async def vctextset_dashboard(self, ctx: commands.Context):
+        """
+        Open the interactive VC Text Configuration Dashboard.
+        """
+        log.debug(f"[VCText] Dashboard invoked by {ctx.author} in {ctx.guild.name}.")
+        view = VCDashboardView(self, ctx)
+        await ctx.send(view.get_status_text(), view=view)
 
     @vctextset.command(name="view", aliases=["list"])
     async def vctextset_view(self, ctx: commands.Context):
