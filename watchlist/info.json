@@ -1,0 +1,11 @@
+{
+    "author": ["NoiselessVolatileLobster"],
+    "name": "Watchlist",
+    "short": "Monitor selected users for specific actions.",
+    "description": "Places selected users on a watch list and sends notifications to a configured channel when they change nicknames, create invites, delete messages, or mention others.",
+    "install_msg": "Thanks for installing Watchlist! Use `[p]watchlistset` to configure your alert channel and add users.",
+    "requirements": ["tabulate"],
+    "tags": ["utility", "moderation", "watch", "alerts"],
+    "end_user_data_statement": "This cog stores Discord User IDs strictly for the purpose of monitoring their actions within the server where they are configured to be watched.",
+    "min_bot_version": "3.5.0"
+}
